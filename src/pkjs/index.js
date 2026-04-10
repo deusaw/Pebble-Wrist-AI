@@ -33,6 +33,15 @@ function sanitizePebbleText(text) {
     .replace(/\u00E2\u0080[\u0090-\u00BF]/g, '');
 }
 
+// PebbleKit JS 的 XHR 可能无法正确发送非 ASCII 字符（如中文 system prompt），
+// 将所有非 ASCII 转义为 JSON \uXXXX 格式，确保请求体纯 ASCII。
+function safeJsonStringify(obj) {
+  var str = JSON.stringify(obj);
+  return str.replace(/[\u0080-\uFFFF]/g, function(c) {
+    return '\\u' + ('0000' + c.charCodeAt(0).toString(16)).slice(-4);
+  });
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 数据层：多对话存储
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -259,7 +268,7 @@ function generateTitle(chatId, userMsg, aiReply) {
   xhr.onerror = function() { console.log('[Title] Network error'); };
   xhr.ontimeout = function() { console.log('[Title] Timed out'); };
 
-  xhr.send(JSON.stringify({
+  xhr.send(safeJsonStringify({
     model: model,
     stream: false,
     max_tokens: 300,
@@ -370,7 +379,7 @@ function askAI(question, onChunk, onFinish) {
     body.extra_body = { reasoning: { enabled: true } };
   }
 
-  xhr.send(JSON.stringify(body));
+  xhr.send(safeJsonStringify(body));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
