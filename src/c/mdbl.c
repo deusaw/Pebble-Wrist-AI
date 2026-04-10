@@ -949,7 +949,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *idx
   graphics_context_set_text_color(ctx, highlighted ? GColorWhite : GColorBlack);
   graphics_draw_text(ctx, title, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), title_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
   graphics_context_set_text_color(ctx, highlighted ? GColorCeleste : (active ? C_ACCENT : C_SUBTITLE));
-  graphics_draw_text(ctx, sub, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD), sub_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  graphics_draw_text(ctx, sub, fonts_get_system_font(FONT_KEY_GOTHIC_14), sub_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
 
 static void delayed_pop_timer(void *data) {
