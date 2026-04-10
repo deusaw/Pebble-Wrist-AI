@@ -297,15 +297,13 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
       break;
 
     case STATE_THINKING: {
-      // 圆的呼吸：幅度很小（±1px），圆本身缩小一点
-      int wave = s_pulse_phase % 30;
-      int offset = (wave <= 15) ? wave : 30 - wave;  // 0..15..0
-      int breathe_r = s_circle_r_big - 6 + (offset > 7 ? 1 : 0); // 只有±1px的微小呼吸
+      int wave = s_pulse_phase % 24;
+      int offset = (wave <= 12) ? wave : 24 - wave;  // 0..12..0
+      int breathe_r = s_circle_r_big - 4 + (offset > 4 ? (offset > 8 ? 2 : 1) : 0); // ±2px
       graphics_context_set_fill_color(ctx, C_CIRCLE);
       graphics_fill_circle(ctx, GPoint(cx, s_circle_y_big), breathe_r);
       draw_text(ctx, "PWAI", font_title, s_circle_y_big, C_TEXT_DARK);
-      // spinner 小点用固定半径轨道，不跟随圆呼吸
-      draw_spinner(ctx, cx, s_circle_y_big, s_circle_r_big - 6);
+      draw_spinner(ctx, cx, s_circle_y_big, s_circle_r_big - 4);
       draw_text(ctx, "Thinking...", font_small, s_subtitle_y, C_ACCENT);
       break;
     }
