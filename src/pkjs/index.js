@@ -9,6 +9,21 @@ var MAX_CONFIG_CHATS = 8;       // 配置页面按倒序传递 8 个，保障蓝
 var DEFAULT_PROMPT = "You are Pebble Wrist AI, a concise assistant on a Pebble smartwatch. Rules: 1) Reply ONLY with the final answer, no reasoning or thinking process. 2) Keep responses under 400 words in English, or under 400 Chinese characters. 3) No markdown, no bullet lists. 4) Use plain sentences only.";
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// 文本清洗：完美解决 Pebble 缺失某些 Unicode 标点引发乱码（â☐☐）的问题
+// ═══════════════════════════════════════════════════════════════════════════════
+function sanitizePebbleText(text) {
+  if (!text) return '';
+  try { text = text.normalize('NFKC'); } catch(e) {}
+  return text
+    .replace(/\*\*/g, '')
+    .replace(/###+/g, '')
+    .replace(/[\u2018\u2019`]/g, "'") // 智能单引号转标准单引号
+    .replace(/[\u201C\u201D]/g, '"') // 智能双引号转标准双引号
+    .replace(/[\u2013\u2014]/g, '-') // 长短破折号转标准减号
+    .replace(/\u2026/g, '...');      // 中文/英文省略号转三个点
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // 数据层：多对话存储
 // ═══════════════════════════════════════════════════════════════════════════════
 function generateId() {
@@ -156,7 +171,7 @@ function sendChatList() {
   var store = loadStore();
   var chats = store.chats.slice().reverse().slice(0, MAX_WATCH_CHATS);
   var lines = chats.map(function(c) {
-    return c.id.substring(0, 11) + '|' + (c.title || 'New chat').substring(0, 35);
+    return c.id + '|' + (c.title || 'New chat').substring(0, 35);
   });
   var listStr = lines.join('\n');
   sendToWatch({ 'CHAT_LIST': listStr, 'SWITCH_CHAT': store.active_id || '' });
@@ -207,6 +222,7 @@ function generateTitle(chatId, userMsg, aiReply) {
       }
 
       // Clean up quotes and markdown
+      title = sanitizePebbleText(title);
       title = title.replace(/^[\"'\*]+|[\"'\*]+$/g, '').trim();
       title = title.replace(/^[#\s\-:]+/g, '').trim();
       title = title.replace(/\*+/g, '');
@@ -330,8 +346,7 @@ function askAI(question, onChunk, onFinish) {
                     // 做有状态思考过滤，正确处理跨 chunk 的 <think> 标签
                     var text = filterThinking(rawText);
                     if (text) {
-                      try { text = text.normalize('NFKC'); } catch(e) {}
-                      text = text.replace(/\*\*/g, '').replace(/###+/g, '');
+                      text = sanitizePebbleText(text);
                       accumulatedReply += text;
                       onChunk(text);
                     }
@@ -363,8 +378,7 @@ function askAI(question, onChunk, onFinish) {
         var dp = JSON.parse(xhr.responseText);
         if (dp.choices && dp.choices.length > 0 && dp.choices[0].message) {
             var fullText = dp.choices[0].message.content || '';
-            try { fullText = fullText.normalize('NFKC'); } catch(e) {}
-            fullText = fullText.replace(/\*\*/g, '').replace(/###+/g, '');
+            fullText = sanitizePebbleText(fullText);
             accumulatedReply = fullText;
         }
       } catch (e) {}
@@ -382,7 +396,7 @@ function askAI(question, onChunk, onFinish) {
                   if (p.choices && p.choices.length > 0 && p.choices[0].delta) {
                       // 忽略 reasoning，只取 content，并过滤思考标签
                       var t = filterThinking(p.choices[0].delta.content || '');
-                      if (t) accumulatedReply += t;
+                      if (t) accumulatedReply += sanitizePebbleText(t);
                   }
               } catch (e) {}
           }

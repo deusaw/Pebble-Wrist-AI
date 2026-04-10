@@ -968,7 +968,7 @@ static void menu_select_click(MenuLayer *menu, MenuIndex *idx, void *ctx) {
 
     if (s_state == STATE_RESPONSE) {
       s_reply_buf[0] = '\0';
-      set_state(STATE_EXPANDING);
+      set_state(STATE_IDLE_READY);
     }
     app_timer_register(100, delayed_pop_timer, NULL);
     return;
@@ -1015,11 +1015,7 @@ static void menu_select_click(MenuLayer *menu, MenuIndex *idx, void *ctx) {
   text_layer_set_text(s_reply_layer, "");
   text_layer_set_text(s_question_display_layer, "");
 
-  if (s_state == STATE_RESPONSE) {
-      set_state(STATE_EXPANDING);
-  } else {
-      set_state(STATE_IDLE_READY);
-  }
+  set_state(STATE_IDLE_READY);
 
   app_timer_register(100, delayed_pop_timer, NULL);
 }
