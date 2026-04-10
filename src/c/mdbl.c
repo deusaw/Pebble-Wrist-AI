@@ -685,9 +685,14 @@ static void select_long_handler(ClickRecognizerRef r, void *ctx) {
   }
 
   if (s_state == STATE_IDLE_READY || s_state == STATE_RESPONSE) {
-    // 保护：IDLE_READY 下必须有内容才能"清空"；RESPONSE 状态一定有内容
-    bool has_content = (s_reply_buf[0] != '\0' || s_question_display[0] != '\0');
-    if (!has_content && s_state == STATE_IDLE_READY) {
+    // 保护：仅在当前已经是空白新对话时才阻止重复创建
+    bool already_new = (s_state == STATE_IDLE_READY
+                        && s_reply_buf[0] == '\0'
+                        && s_question_display[0] == '\0'
+                        && s_active_chat_index >= 0
+                        && s_active_chat_index < s_chat_count
+                        && strncmp(s_chat_entries[s_active_chat_index].title, "New chat", 8) == 0);
+    if (already_new) {
       vibes_double_pulse();  // 已经是空白新对话，提示用户无需操作
       return;
     }
