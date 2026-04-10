@@ -13,18 +13,24 @@ var DEFAULT_PROMPT = "You are Pebble Wrist AI, a concise assistant on a Pebble s
 // ═══════════════════════════════════════════════════════════════════════════════
 function sanitizePebbleText(text) {
   if (!text) return '';
-  // 注意：PebbleKit JS 是 ES5 引擎，不支持 normalize('NFKC')，强行调用会崩溃。
-  // 改用纯正则替换覆盖所有常见的非 ASCII 标点符号。
   return text
-    .replace(/\*\*/g, '')           // Markdown 加粗
-    .replace(/###+/g, '')           // Markdown 标题
-    .replace(/[\u2018\u2019\u0060]/g, "'") // 智能单引号 ‘’` → '
-    .replace(/[\u201C\u201D]/g, '"') // 智能双引号 “” → "
-    .replace(/[\u2013\u2014\u2015]/g, '-') // 破折号–—― → -
-    .replace(/\u2026/g, '...')      // 省略号 … → ...
-    .replace(/[\u2022\u2023\u25E6]/g, '-') // 项目符号 •‣◦ → -
-    .replace(/[\u00A0]/g, ' ')      // 不间断空格 → 普通空格
-    .replace(/[\u200B\u200C\u200D\uFEFF]/g, ''); // 零宽字符/BOM 完全移除
+    .replace(/\*\*/g, '')
+    .replace(/###+/g, '')
+    .replace(/[\u2018\u2019\u0060]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014\u2015]/g, '-')
+    .replace(/\u2026/g, '...')
+    .replace(/[\u2022\u2023\u25E6]/g, '-')
+    .replace(/[\u00A0]/g, ' ')
+    .replace(/[\u200B\u200C\u200D\uFEFF]/g, '')
+    .replace(/\u00E2\u0080\u0098/g, "'")
+    .replace(/\u00E2\u0080\u0099/g, "'")
+    .replace(/\u00E2\u0080\u009C/g, '"')
+    .replace(/\u00E2\u0080\u009D/g, '"')
+    .replace(/\u00E2\u0080\u0093/g, '-')
+    .replace(/\u00E2\u0080\u0094/g, '-')
+    .replace(/\u00E2\u0080\u00A6/g, '...')
+    .replace(/\u00E2\u0080[\u0090-\u00BF]/g, '');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -295,84 +301,11 @@ function askAI(question, onChunk, onFinish) {
   xhr.setRequestHeader('Authorization', 'Bearer ' + apiKey);
   xhr.setRequestHeader('HTTP-Referer', 'https://github.com/deusaw/Pebble-Wrist-AI');
   xhr.setRequestHeader('X-Title', 'Pebble Wrist AI');
-  
-  var position = 0;
-  var streamBuffer = '';
-  var accumulatedReply = '';
-  var hasError = false;
-
-  // 有状态思考内容过滤器（跨 chunk 正确处理 <think>...</think>）
-  var inThinkingBlock = false;
-  function filterThinking(text) {
-    var result = '';
-    var i = 0;
-    while (i < text.length) {
-      if (!inThinkingBlock) {
-        var openIdx = text.indexOf('<think>', i);
-        if (openIdx === -1) { result += text.substring(i); break; }
-        result += text.substring(i, openIdx);  // 输出 <think> 前的部分
-        inThinkingBlock = true;
-        i = openIdx + 7;
-      } else {
-        var closeIdx = text.indexOf('</think>', i);
-        if (closeIdx === -1) { break; }  // 还在思考块中，丢弃此 chunk 剩余内容
-        inThinkingBlock = false;
-        i = closeIdx + 8;
-      }
-    }
-    return result;
-  }
-
-  xhr.onprogress = function() {
-    // 整体包裹 try/catch —— PebbleKit JS 的 XHR 可能不支持流式访问 responseText，
-    // 若报错则静默忽略，等待 onload 中的 fallback 处理。
-    try {
-      if (thisSessionId !== currentAskSessionId) {
-         xhr.abort();
-         return;
-      }
-      if (xhr.status >= 400 || hasError) return;
-      var newData = xhr.responseText.substring(position);
-      position = xhr.responseText.length;
-      streamBuffer += newData;
-      
-      var lines = streamBuffer.split('\n');
-      streamBuffer = lines.pop(); // Keep incomplete line
-      
-      for (var i = 0; i < lines.length; i++) {
-          var line = lines[i].trim();
-          if (line.indexOf('data: ') === 0) {
-              var dataStr = line.substring(6).trim();
-              if (dataStr === '[DONE]') continue;
-              try {
-                  var payload = JSON.parse(dataStr);
-                  if (payload.choices && payload.choices.length > 0 && payload.choices[0].delta) {
-                      var delta = payload.choices[0].delta;
-                      var rawText = delta.content || '';
-                      if (!rawText && delta.reasoning) {
-                        rawText = delta.reasoning;
-                      }
-                      var text = filterThinking(rawText);
-                      if (text) {
-                        text = sanitizePebbleText(text);
-                        accumulatedReply += text;
-                        onChunk(text);
-                      }
-                  }
-              } catch (e) {}
-          }
-      }
-    } catch (progressErr) {
-      // PebbleKit JS 的 XHR 可能不支持流式 responseText，静默忽略即可
-      console.log('[onprogress] Error (will use fallback): ' + progressErr);
-    }
-  };
 
   xhr.onload = function() {
     if (thisSessionId !== currentAskSessionId) return;
 
     if (xhr.status >= 400) {
-      hasError = true;
       var errMsg = 'HTTP ' + xhr.status;
       try {
         var errData = JSON.parse(xhr.responseText);
@@ -383,49 +316,21 @@ function askAI(question, onChunk, onFinish) {
       onFinish(errMsg, '');
       return;
     }
-    
-    if (!accumulatedReply && !hasError && xhr.responseText) {
-      console.log('[Stream] No stream content, trying fallbacks. len=' + xhr.responseText.length);
-      // 容错 1：可能是由于各种网络原因只拿到一条完整的 JSON，并非数据流。尝试解析：
-      try {
-        var dp = JSON.parse(xhr.responseText);
-        if (dp.choices && dp.choices.length > 0 && dp.choices[0].message) {
-            var fullText = dp.choices[0].message.content || dp.choices[0].message.reasoning || '';
-            fullText = sanitizePebbleText(fullText);
-            accumulatedReply = fullText;
-            console.log('[FB1] non-stream ok: ' + accumulatedReply.substring(0, 40));
-        }
-      } catch (e) {
-        console.log('[FB1] not JSON, trying SSE re-parse');
-      }
 
-      // 容错 2：如果真的是流，但是 onprogress 没被触发或崩溃
-      if (!accumulatedReply) {
-        try {
-          inThinkingBlock = false;
-          var lines2 = xhr.responseText.split('\n');
-          for (var j = 0; j < lines2.length; j++) {
-            var l = lines2[j].trim();
-            if (l.indexOf('data: ') === 0) {
-                var ds = l.substring(6).trim();
-                if (ds === '[DONE]') continue;
-                try {
-                    var p = JSON.parse(ds);
-                    if (p.choices && p.choices.length > 0 && p.choices[0].delta) {
-                        var rawChunk = p.choices[0].delta.content || p.choices[0].delta.reasoning || '';
-                        var t = filterThinking(rawChunk);
-                        if (t) accumulatedReply += sanitizePebbleText(t);
-                    }
-                } catch (e) {}
-            }
-          }
-          if (accumulatedReply) {
-            console.log('[FB2] SSE re-parse ok: ' + accumulatedReply.substring(0, 40));
-          }
-        } catch (e2) {
-          console.log('[FB2] SSE parse error: ' + e2);
-        }
+    var accumulatedReply = '';
+    try {
+      var data = JSON.parse(xhr.responseText);
+      if (data.choices && data.choices.length > 0 && data.choices[0].message) {
+        accumulatedReply = data.choices[0].message.content || data.choices[0].message.reasoning || '';
       }
+    } catch (e) {
+      console.log('[Parse] JSON error: ' + e);
+    }
+
+    // Filter <think>...</think> blocks and sanitize
+    if (accumulatedReply) {
+      accumulatedReply = accumulatedReply.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+      accumulatedReply = sanitizePebbleText(accumulatedReply);
     }
 
     console.log('[Done] reply len=' + (accumulatedReply || '').length);
@@ -435,7 +340,6 @@ function askAI(question, onChunk, onFinish) {
     var qs = question.length > 800 ? question.substring(0, 800) + '...' : question;
     var rs = replyToSave.length > 800 ? replyToSave.substring(0, 800) + '...' : replyToSave;
 
-    // AI 答复完毕：截断超长部分并存入手机端的沙盒 LocalStorage (保护总 JSON 不过大)
     chat.messages.push({ role: 'user', content: qs });
     chat.messages.push({ role: 'assistant', content: rs });
     if (chat.messages.length > MAX_MESSAGES_PER_CHAT) {
@@ -455,13 +359,12 @@ function askAI(question, onChunk, onFinish) {
   };
 
   xhr.onerror = function() { onFinish('Network error', ''); };
-  xhr.timeout = 80000; // 80s total timeout
+  xhr.timeout = 80000;
   xhr.ontimeout = function() { onFinish('Request timed out', ''); };
 
   var messages = [{ role: 'system', content: systemMessage }].concat(sendMessages);
-  var body = { model: model, stream: true, messages: messages };
+  var body = { model: model, stream: false, messages: messages };
   
-  // 对于支持 reasoning 的高级模型（如 gemma-4 等），强制在 body 里启用 fallback 和 reasoning 路由特征，增加可用性
   if (model.indexOf('gemma') !== -1) {
     body.provider = { allow_fallbacks: true };
     body.extra_body = { reasoning: { enabled: true } };

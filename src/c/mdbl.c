@@ -69,7 +69,7 @@ static DictationSession *s_dictation_session;
 
 // ── 对话列表（从手机接收）──────────────────────────────────────────────────────
 #define MAX_WATCH_CHATS 20   // RAM: 20 × 48 bytes = 960 bytes（Basalt 24KB 内安全）
-#define CHAT_ID_LEN     12
+#define CHAT_ID_LEN     20   // JS 生成的 ID 长度约 13 字符，留充走余量
 #define CHAT_TITLE_LEN  36
 
 typedef struct {
