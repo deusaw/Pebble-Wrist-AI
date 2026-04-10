@@ -259,8 +259,8 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
 
   int cx = s_width / 2;
   GFont font_title = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
-  GFont font_sub   = fonts_get_system_font(FONT_KEY_GOTHIC_18);
-  GFont font_small = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+  GFont font_sub   = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
+  GFont font_small = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
 
   switch (s_state) {
     case STATE_IDLE_NO_KEY:
@@ -890,22 +890,25 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *idx
   MenuIndex sel = menu_layer_get_selected_index(menu);
   bool highlighted = (sel.row == idx->row && sel.section == idx->section);
 
-  if (idx->row == 0) {
-    // ── 模型行 ──
-    graphics_context_set_fill_color(ctx, highlighted ? GColorCobaltBlue : GColorOxfordBlue);
+  // 高亮背景（所有行通用）
+  if (highlighted) {
+    graphics_context_set_fill_color(ctx, GColorCobaltBlue);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  }
 
+  if (idx->row == 0) {
+    // ── 模型行：无底色，模型名 + 右侧三个点 ──
     const char *display = s_current_model_display[0] ? model_short_name(s_current_model_display) : "No model";
     int x_pad = PBL_IF_ROUND_ELSE(24, 10);
 
-    graphics_context_set_text_color(ctx, highlighted ? GColorWhite : GColorCeleste);
+    graphics_context_set_text_color(ctx, highlighted ? GColorWhite : C_ACCENT);
     GRect name_rect = GRect(x_pad, bounds.size.h / 2 - 11, bounds.size.w - x_pad - 30, 22);
     graphics_draw_text(ctx, display, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
                        name_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
     int dot_y = bounds.size.h / 2;
     int dot_x_start = bounds.size.w - x_pad - 14;
-    graphics_context_set_fill_color(ctx, highlighted ? GColorWhite : GColorPictonBlue);
+    graphics_context_set_fill_color(ctx, highlighted ? GColorWhite : C_DOT_OFF);
     for (int d = 0; d < 3; d++) {
       graphics_fill_circle(ctx, GPoint(dot_x_start + d * 6, dot_y), 2);
     }
@@ -913,10 +916,8 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *idx
   }
 
   if (idx->row == 1) {
-    // ── 新建对话按钮 ──
-    graphics_context_set_fill_color(ctx, highlighted ? GColorBlueMoon : GColorCobaltBlue);
-    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-    graphics_context_set_text_color(ctx, GColorWhite);
+    // ── 新建对话按钮：无底色 ──
+    graphics_context_set_text_color(ctx, highlighted ? GColorWhite : C_ACCENT);
     GRect add_rect = GRect(0, bounds.size.h / 2 - 12, bounds.size.w, 24);
     graphics_draw_text(ctx, "+ START NEW CHAT", fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
                        add_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
@@ -927,17 +928,14 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *idx
   int i = idx->row - 2;
   bool active = (i == s_active_chat_index);
 
-  if (highlighted) {
-    graphics_context_set_fill_color(ctx, GColorCobaltBlue);
-    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-  } else if (active) {
+  if (!highlighted && active) {
     graphics_context_set_fill_color(ctx, GColorCeleste);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
   }
 
   int x_offset = PBL_IF_ROUND_ELSE(24, 8);
   if (active) {
-    graphics_context_set_fill_color(ctx, highlighted ? GColorWhite : GColorCobaltBlue);
+    graphics_context_set_fill_color(ctx, highlighted ? GColorWhite : C_DOT_ON);
     graphics_fill_circle(ctx, GPoint(x_offset + 2, bounds.size.h / 2), 4);
   }
 
@@ -950,8 +948,8 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *idx
 
   graphics_context_set_text_color(ctx, highlighted ? GColorWhite : GColorBlack);
   graphics_draw_text(ctx, title, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), title_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-  graphics_context_set_text_color(ctx, highlighted ? GColorCeleste : (active ? GColorCobaltBlue : GColorDarkGray));
-  graphics_draw_text(ctx, sub, fonts_get_system_font(FONT_KEY_GOTHIC_14), sub_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  graphics_context_set_text_color(ctx, highlighted ? GColorCeleste : (active ? C_ACCENT : C_SUBTITLE));
+  graphics_draw_text(ctx, sub, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD), sub_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
 
 static void delayed_pop_timer(void *data) {
