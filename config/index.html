@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wrist AI Settings</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, sans-serif; background: #0a0e1a; color: #ddd; padding: 16px; }
+    h1 { font-size: 22px; text-align: center; padding: 12px 0; color: #fff; }
+    h2 { font-size: 16px; color: #8af; margin: 14px 0 8px; }
+    .field { margin-bottom: 14px; }
+    label { display: block; font-size: 13px; color: #8af; margin-bottom: 4px; }
+    input, textarea { width: 100%; padding: 10px; border: 1px solid #223; border-radius: 6px; background: #111; color: #fff; font-size: 14px; }
+    textarea { min-height: 80px; }
+    .hint { font-size: 11px; color: #556; margin-top: 2px; }
+    .status { font-size: 12px; color: #4c8; margin-top: 4px; }
+    .btn { width: 100%; padding: 12px; border: none; border-radius: 8px; font-size: 15px; color: #fff; cursor: pointer; margin-bottom: 8px; }
+    .btn-primary { background: #0047AB; }
+    .btn-primary:active { background: #0066ff; }
+    .btn-danger { background: #661111; }
+    .btn-danger:active { background: #cc2222; }
+    .btn-secondary { background: #2a4a6b; }
+    .divider { border-top: 1px solid #223; margin: 16px 0; }
+
+    /* 模型列表样式 */
+    .model-input-row { display: flex; gap: 8px; margin-bottom: 10px; }
+    .model-input-row input { flex: 1; }
+    .model-add-btn {
+      width: 44px; min-width: 44px; padding: 10px; border: none; border-radius: 6px;
+      background: #0047AB; color: #fff; font-size: 18px; cursor: pointer;
+    }
+    .model-add-btn:active { background: #0066ff; }
+    .model-list { list-style: none; }
+    .model-item {
+      display: flex; align-items: center; padding: 10px;
+      background: #111; border-radius: 6px; margin-bottom: 6px;
+      border-left: 3px solid transparent;
+    }
+    .model-item.active { border-left-color: #00cccc; background: #0a1a2e; }
+    .model-info { flex: 1; min-width: 0; }
+    .model-name { font-size: 14px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .model-status { font-size: 11px; color: #556; margin-top: 2px; }
+    .model-status.active-status { color: #00cccc; }
+    .model-actions { display: flex; gap: 6px; margin-left: 8px; }
+    .model-btn {
+      padding: 4px 8px; border: none; border-radius: 4px; font-size: 11px;
+      cursor: pointer; color: #fff;
+    }
+    .model-btn-switch { background: #0047AB; }
+    .model-btn-delete { background: #441111; }
+
+    /* 对话列表 */
+    .chat-list { list-style: none; }
+    .chat-item {
+      display: flex; align-items: center; padding: 10px;
+      background: #111; border-radius: 6px; margin-bottom: 6px;
+    }
+    .chat-item.active { border-left: 3px solid #00cccc; background: #0a1a2e; }
+    .chat-info { flex: 1; min-width: 0; }
+    .chat-title { font-size: 14px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .chat-meta { font-size: 11px; color: #556; margin-top: 2px; }
+    .chat-actions { display: flex; gap: 6px; margin-left: 8px; }
+    .chat-btn {
+      padding: 4px 8px; border: none; border-radius: 4px; font-size: 11px;
+      cursor: pointer; color: #fff;
+    }
+    .chat-btn-switch { background: #0047AB; }
+    .chat-btn-delete { background: #441111; }
+    .empty { color: #556; font-size: 13px; text-align: center; padding: 20px; }
+  </style>
+</head>
+<body>
+  <h1>Wrist AI</h1>
+
+  <!-- API 设置 -->
+  <div class="field">
+    <label>OpenRouter API Key</label>
+    <input type="password" id="api_key" placeholder="sk-or-v1-xxxx...">
+    <div class="status" id="key_status"></div>
+  </div>
+
+  <!-- 模型列表管理 -->
+  <div class="field">
+    <label>Models (max 5)</label>
+    <div class="model-input-row">
+      <input type="text" id="model_input" placeholder="Enter model name, e.g. google/gemma-4-31b-it">
+      <button class="model-add-btn" id="model_add" title="Add model">✓</button>
+    </div>
+    <ul class="model-list" id="model_list_el"></ul>
+    <div class="hint">Current active model is used for AI requests. Tap Switch to change. Max 5 models.</div>
+  </div>
+
+  <div class="field">
+    <label>System Prompt</label>
+    <textarea id="system_message"></textarea>
+  </div>
+
+  <button class="btn btn-primary" id="save">Save Settings</button>
+
+  <div class="divider"></div>
+
+  <!-- 对话管理 -->
+  <h2>Conversations</h2>
+  <ul class="chat-list" id="chat_list"></ul>
+
+  <div class="divider"></div>
+
+  <button class="btn btn-danger" id="clear_all">Delete All Conversations</button>
+  <button class="btn btn-danger" id="delete_key" style="margin-top:8px">Delete API Key</button>
+
+  <script>
+    function getParam(name) {
+      var m = window.location.search.match(new RegExp('[?&]' + name + '=([^&]*)'));
+      return m ? decodeURIComponent(m[1]) : '';
+    }
+
+    // 读取初始化参数（由 PebbleKit JS 的 openURL 通过 query 参数传递）
+    var hasKey = getParam('has_key') === '1';
+    var activeId = getParam('active_id');
+    var currentModel = getParam('model') || 'google/gemma-4-31b-it';
+    var chats = [];
+    try {
+      chats = JSON.parse(getParam('chats')) || [];
+    } catch(e) {}
+
+    // 从 Hash 片段（URL # 后方内容）中提取大容量的对话文本数据。
+    // 采用 Hash 而不是 URL 参数(?&)，完美绕过了 Github Pages 服务器单次请求报头不得大于 8KB (HTTP 414) 的死线设定，纯赖底层手机浏览器在本地消化高达数百 KB 的文本数据
+    var safeMessagesMap = {};
+    try {
+      var hashParam = '';
+      var hashMatch = window.location.hash.match(new RegExp('export_data=([^&]*)'));
+      if (hashMatch) {
+         hashParam = decodeURIComponent(hashMatch[1]);
+      } else {
+         hashParam = getParam('export_data');
+      }
+      var exportArr = JSON.parse(hashParam) || [];
+      for (var i = 0; i < exportArr.length; i++) {
+        safeMessagesMap[exportArr[i].id] = exportArr[i].messages;
+      }
+    } catch(e) {}
+
+    // 模型列表
+    var modelList = [];
+    try { modelList = JSON.parse(getParam('model_list')) || []; } catch(e) {}
+    if (!Array.isArray(modelList) || modelList.length === 0) {
+      modelList = [currentModel];
+    }
+
+    // 填充设置
+    document.getElementById('key_status').textContent =
+      hasKey ? 'Key is set. Leave blank to keep.' : 'No key configured.';
+    document.getElementById('api_key').placeholder =
+      hasKey ? 'Leave blank to keep current' : 'sk-or-v1-xxxx...';
+    document.getElementById('system_message').value = getParam('system_message') ||
+      "You are Pebble Wrist AI, a daily Q&A assistant. Your client runs on a Pebble smartwatch. Your answers must be concise: think in no more than two lines, reply only with essential information, do not elaborate, no filler.";
+
+    // ── 模型列表 UI ──────────────────────────────────────────────────
+    var modelListEl = document.getElementById('model_list_el');
+
+    function renderModelList() {
+      if (modelList.length === 0) {
+        modelListEl.innerHTML = '<li class="empty">No models added</li>';
+        return;
+      }
+      var html = '';
+      for (var i = 0; i < modelList.length; i++) {
+        var m = modelList[i];
+        var isActive = (m === currentModel);
+        html += '<li class="model-item' + (isActive ? ' active' : '') + '">'
+          + '<div class="model-info">'
+          + '<div class="model-name">' + m.replace(/</g, '&lt;') + '</div>'
+          + '<div class="model-status' + (isActive ? ' active-status' : '') + '">'
+          + (isActive ? 'Active' : 'Tap Switch to activate') + '</div>'
+          + '</div>'
+          + '<div class="model-actions">'
+          + (isActive ? '' : '<button class="model-btn model-btn-switch" data-idx="' + i + '">Switch</button>')
+          + (modelList.length > 1 ? '<button class="model-btn model-btn-delete" data-idx="' + i + '">✕</button>' : '')
+          + '</div></li>';
+      }
+      modelListEl.innerHTML = html;
+    }
+
+    renderModelList();
+
+    // 添加模型
+    document.getElementById('model_add').addEventListener('click', function() {
+      var input = document.getElementById('model_input');
+      var name = input.value.trim();
+      if (!name) return;
+      if (modelList.length >= 5) {
+        alert('Maximum 5 models allowed');
+        return;
+      }
+      if (modelList.indexOf(name) !== -1) {
+        alert('Model already in list');
+        return;
+      }
+      modelList.push(name);
+      input.value = '';
+      renderModelList();
+    });
+
+    // 模型列表点击事件（切换/删除）
+    modelListEl.addEventListener('click', function(e) {
+      var btn = e.target;
+      var idx = parseInt(btn.dataset.idx, 10);
+      if (isNaN(idx)) return;
+
+      if (btn.classList.contains('model-btn-switch')) {
+        currentModel = modelList[idx];
+        renderModelList();
+      } else if (btn.classList.contains('model-btn-delete')) {
+        var wasActive = (modelList[idx] === currentModel);
+        modelList.splice(idx, 1);
+        if (wasActive && modelList.length > 0) {
+          currentModel = modelList[0];
+        }
+        renderModelList();
+      }
+    });
+
+    // ── 对话列表 ──────────────────────────────────────────────────────
+    var listEl = document.getElementById('chat_list');
+    if (chats.length === 0) {
+      listEl.innerHTML = '<li class="empty">No conversations yet</li>';
+    } else {
+      // 倒序显示（最新在前）
+      chats.sort(function(a, b) { return b.created - a.created; });
+      var html = '';
+      for (var i = 0; i < chats.length; i++) {
+        var c = chats[i];
+        var isActive = c.id === activeId;
+        var date = new Date(c.created);
+        var dateStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString().substring(0, 5);
+        var msgCount = c.count || 0;
+        var hasDetails = !!safeMessagesMap[c.id];
+        html += '<li class="chat-item' + (isActive ? ' active' : '') + '">'
+          + '<div class="chat-info">'
+          + '<div class="chat-title">' + (c.title || 'Untitled').replace(/</g, '&lt;') + '</div>'
+          + '<div class="chat-meta">' + dateStr + ' · ' + msgCount + ' msgs' + (isActive ? ' · Active' : '') + (!hasDetails ? ' · ⚠️ 无法导出全量' : '') + '</div>'
+          + '</div>'
+          + '<div class="chat-actions">'
+          + (isActive ? '' : '<button class="chat-btn chat-btn-switch" data-id="' + c.id + '">Switch</button>')
+          + '<button class="chat-btn chat-btn-export" data-id="' + c.id + '">↓ JSON</button>'
+          + '<button class="chat-btn chat-btn-delete" data-id="' + c.id + '">Del</button>'
+          + '</div></li>';
+      }
+      listEl.innerHTML = html;
+    }
+
+    // 构造返回设置
+    function buildSettings(extra) {
+      var s = {
+        model: currentModel,
+        model_list: modelList,
+        system_message: document.getElementById('system_message').value.trim()
+      };
+      var key = document.getElementById('api_key').value.trim();
+      if (key.length > 0) s.api_key = key;
+      if (extra) {
+        for (var k in extra) s[k] = extra[k];
+      }
+      return s;
+    }
+
+    function closeWith(settings) {
+      // 至少要有一个有效字段才关闭
+      var hasContent = Object.keys(settings).some(function(k) {
+        return settings[k] !== '' && settings[k] !== undefined;
+      });
+      if (!hasContent) return;
+      var returnTo = getParam('return_to');
+      if (!returnTo) returnTo = 'pebblejs://close#';
+      window.location.href = returnTo + encodeURIComponent(JSON.stringify(settings));
+    }
+
+    // 保存设置
+    document.getElementById('save').addEventListener('click', function() {
+      var btn = this;
+      btn.disabled = true;
+      btn.textContent = 'Saving...';
+      btn.style.opacity = '0.5';
+      
+      setTimeout(function() {
+        closeWith(buildSettings());
+      }, 100);
+    });
+
+    // 切换/删除/导出对话（事件委托）
+    listEl.addEventListener('click', function(e) {
+      var btn = e.target;
+      if (btn.classList.contains('chat-btn-switch')) {
+        closeWith(buildSettings({ switch_to: btn.dataset.id }));
+      } else if (btn.classList.contains('chat-btn-delete')) {
+        if (confirm('Delete this conversation?')) {
+          closeWith(buildSettings({ delete_chat: btn.dataset.id }));
+        }
+      } else if (btn.classList.contains('chat-btn-export')) {
+        // 触发导出包含完整上下问信息的 JSON 备份（单条对话极简导出设计，不提供合并导出，防止不可控文件体积）
+        var cid = btn.dataset.id;
+        var chat = null;
+        for (var ci = 0; ci < chats.length; ci++) {
+          if (chats[ci].id === cid) { chat = chats[ci]; break; }
+        }
+        if (!chat) { alert('Chat data not found. Please reopen settings.'); return; }
+        var msgs = safeMessagesMap[cid];
+        if (!msgs) {
+          alert('⚠️ 无法导出：该对话日志过长或过旧，未能加载以防止手机 WebView 崩溃溢出。请尝试删减其它对话腾出空间。');
+          return;
+        }
+        var exportObj = {
+          id: chat.id,
+          title: chat.title,
+          created: chat.created,
+          model: currentModel,
+          system_message: document.getElementById('system_message').value.trim(),
+          messages: msgs
+        };
+        var json = JSON.stringify(exportObj, null, 2);
+        var blob = new Blob([json], { type: 'application/json' });
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        var safeName = (chat.title || 'chat').replace(/[^\w\u4e00-\u9fa5-]/g, '_').substring(0, 30);
+        a.download = 'pwai_' + safeName + '_' + new Date().toISOString().slice(0, 10) + '.json';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
+    });
+
+
+    // 删除所有对话
+    document.getElementById('clear_all').addEventListener('click', function() {
+      if (confirm('Delete ALL conversations? This cannot be undone.')) {
+        closeWith(buildSettings({ clear_all: true }));
+      }
+    });
+
+    // 删除 API Key
+    document.getElementById('delete_key').addEventListener('click', function() {
+      if (confirm('Delete API key?')) {
+        closeWith(buildSettings({ delete_key: true }));
+      }
+    });
+  </script>
+</body>
+</html>
