@@ -810,11 +810,8 @@ static void window_load(Window *window) {
   // 恢复窗口基础点击（覆盖 ScrollLayer 的默认行为以便响应 UP/DOWN）
   window_set_click_config_provider(window, click_config);
 
-  // 禁用 ScrollLayer 上下阴影/箭头指示器
-  // Pebble SDK 文档：禁用某个方向，直接传 NULL 作为 config 参数（不是在 config 里设 layer=NULL）
-  ContentIndicator *indicator = scroll_layer_get_content_indicator(s_scroll_layer);
-  content_indicator_configure_direction(indicator, ContentIndicatorDirectionUp, NULL);
-  content_indicator_configure_direction(indicator, ContentIndicatorDirectionDown, NULL);
+  // 禁用 ScrollLayer 上下阴影（dithered shadow）
+  scroll_layer_set_shadow_hidden(s_scroll_layer, true);
 
   layer_add_child(root, scroll_layer_get_layer(s_scroll_layer));
 
