@@ -297,13 +297,15 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
       break;
 
     case STATE_THINKING: {
-      int wave = s_pulse_phase % 20;
-      int offset = (wave <= 10) ? wave : 20 - wave; 
-      int breathe_r = s_circle_r_big - 3 + (offset / 2); 
+      // 圆的呼吸：幅度很小（±1px），圆本身缩小一点
+      int wave = s_pulse_phase % 30;
+      int offset = (wave <= 15) ? wave : 30 - wave;  // 0..15..0
+      int breathe_r = s_circle_r_big - 6 + (offset > 7 ? 1 : 0); // 只有±1px的微小呼吸
       graphics_context_set_fill_color(ctx, C_CIRCLE);
       graphics_fill_circle(ctx, GPoint(cx, s_circle_y_big), breathe_r);
       draw_text(ctx, "PWAI", font_title, s_circle_y_big, C_TEXT_DARK);
-      draw_spinner(ctx, cx, s_circle_y_big, breathe_r);
+      // spinner 小点用固定半径轨道，不跟随圆呼吸
+      draw_spinner(ctx, cx, s_circle_y_big, s_circle_r_big - 6);
       draw_text(ctx, "Thinking...", font_small, s_subtitle_y, C_ACCENT);
       break;
     }
@@ -889,22 +891,20 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *idx
 
   if (idx->row == 0) {
     // ── 模型行：深色背景 + 模型名 + 右侧三个点 ──
-    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_context_set_fill_color(ctx, GColorOxfordBlue);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
     const char *display = s_current_model_display[0] ? model_short_name(s_current_model_display) : "No model";
     int x_pad = PBL_IF_ROUND_ELSE(24, 10);
 
-    // 模型名（白色）
-    graphics_context_set_text_color(ctx, GColorWhite);
+    graphics_context_set_text_color(ctx, GColorCeleste);
     GRect name_rect = GRect(x_pad, bounds.size.h / 2 - 11, bounds.size.w - x_pad - 30, 22);
     graphics_draw_text(ctx, display, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
                        name_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-    // 右侧三个圆点（⋯ 表示可编辑/选择）
     int dot_y = bounds.size.h / 2;
     int dot_x_start = bounds.size.w - x_pad - 14;
-    graphics_context_set_fill_color(ctx, GColorLightGray);
+    graphics_context_set_fill_color(ctx, GColorPictonBlue);
     for (int d = 0; d < 3; d++) {
       graphics_fill_circle(ctx, GPoint(dot_x_start + d * 6, dot_y), 2);
     }
@@ -912,32 +912,42 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *idx
   }
 
   if (idx->row == 1) {
-    // ── 新建对话按钮 ──
-    graphics_context_set_text_color(ctx, GColorBlack);
+    // ── 新建对话按钮：浅蓝背景 + 白字 ──
+    graphics_context_set_fill_color(ctx, GColorCobaltBlue);
+    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+    graphics_context_set_text_color(ctx, GColorWhite);
     GRect add_rect = GRect(0, bounds.size.h / 2 - 12, bounds.size.w, 24);
     graphics_draw_text(ctx, "+ START NEW CHAT", fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
                        add_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
     return;
   }
 
-  // ── 对话列表 ──
-  int i = idx->row - 2;  // 偏移掉模型行和新对话行
+  // ── 对话列表：彩色渲染 ──
+  int i = idx->row - 2;
   bool active = (i == s_active_chat_index);
+
+  // Active 行浅蓝背景，非 Active 行白色背景
+  if (active) {
+    graphics_context_set_fill_color(ctx, GColorCeleste);
+    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  }
 
   int x_offset = PBL_IF_ROUND_ELSE(24, 8);
   if (active) {
-    graphics_context_set_fill_color(ctx, C_TEXT_LIGHT);
-    graphics_fill_circle(ctx, GPoint(x_offset, bounds.size.h / 2), 4);
+    graphics_context_set_fill_color(ctx, GColorCobaltBlue);
+    graphics_fill_circle(ctx, GPoint(x_offset + 2, bounds.size.h / 2), 4);
   }
 
   const char *title = s_chat_entries[i].title;
   const char *sub = active ? "Active" : "Tap to switch";
 
-  int text_x = active ? x_offset + 8 : x_offset - 4;
-  GRect title_rect = GRect(text_x, 2, bounds.size.w - x_offset - 8, 20);
-  GRect sub_rect = GRect(text_x, 20, bounds.size.w - x_offset - 8, 20);
+  int text_x = active ? x_offset + 12 : x_offset;
+  GRect title_rect = GRect(text_x, 2, bounds.size.w - text_x - 6, 20);
+  GRect sub_rect = GRect(text_x, 20, bounds.size.w - text_x - 6, 20);
 
+  graphics_context_set_text_color(ctx, GColorBlack);
   graphics_draw_text(ctx, title, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), title_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  graphics_context_set_text_color(ctx, active ? GColorCobaltBlue : GColorDarkGray);
   graphics_draw_text(ctx, sub, fonts_get_system_font(FONT_KEY_GOTHIC_14), sub_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
 
