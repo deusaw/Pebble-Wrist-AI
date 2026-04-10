@@ -341,8 +341,12 @@ function askAI(question, onChunk, onFinish) {
                 var payload = JSON.parse(dataStr);
                 if (payload.choices && payload.choices.length > 0 && payload.choices[0].delta) {
                     var delta = payload.choices[0].delta;
-                    // 完全忽略 delta.reasoning（思考字段），只取 delta.content
+                    // 优先取 delta.content；若为空则回退到 delta.reasoning
+                    // （某些 reasoning 模型会将全部输出放在 reasoning 字段中）
                     var rawText = delta.content || '';
+                    if (!rawText && delta.reasoning) {
+                      rawText = delta.reasoning;
+                    }
                     // 做有状态思考过滤，正确处理跨 chunk 的 <think> 标签
                     var text = filterThinking(rawText);
                     if (text) {
@@ -373,18 +377,22 @@ function askAI(question, onChunk, onFinish) {
     }
     
     if (!accumulatedReply && !hasError && xhr.responseText) {
+      console.log('[Stream] No stream content extracted, trying fallbacks. Response length: ' + xhr.responseText.length);
       // 容错 1：可能是由于各种网络原因只拿到一条完整的 JSON，并非数据流。尝试解析：
       try {
         var dp = JSON.parse(xhr.responseText);
         if (dp.choices && dp.choices.length > 0 && dp.choices[0].message) {
-            var fullText = dp.choices[0].message.content || '';
+            // 优先 content，其次 reasoning（部分模型将最终回复放在 reasoning 字段）
+            var fullText = dp.choices[0].message.content || dp.choices[0].message.reasoning || '';
             fullText = sanitizePebbleText(fullText);
             accumulatedReply = fullText;
+            console.log('[Fallback1] Got non-stream reply: ' + accumulatedReply.substring(0, 60));
         }
       } catch (e) {}
 
       // 容错 2：如果真的是流，但是 onprogress 没被触发
       if (!accumulatedReply) {
+        inThinkingBlock = false; // 重置思考过滤状态以防前次残留
         var lines2 = xhr.responseText.split('\n');
         for (var j = 0; j < lines2.length; j++) {
           var l = lines2[j].trim();
@@ -394,15 +402,20 @@ function askAI(question, onChunk, onFinish) {
               try {
                   var p = JSON.parse(ds);
                   if (p.choices && p.choices.length > 0 && p.choices[0].delta) {
-                      // 忽略 reasoning，只取 content，并过滤思考标签
-                      var t = filterThinking(p.choices[0].delta.content || '');
+                      var rawChunk = p.choices[0].delta.content || p.choices[0].delta.reasoning || '';
+                      var t = filterThinking(rawChunk);
                       if (t) accumulatedReply += sanitizePebbleText(t);
                   }
               } catch (e) {}
           }
         }
+        if (accumulatedReply) {
+          console.log('[Fallback2] Re-parsed stream: ' + accumulatedReply.substring(0, 60));
+        }
       }
     }
+
+    console.log('[Result] Final reply length: ' + (accumulatedReply || '').length);
 
     var replyToSave = accumulatedReply || '(Failed to parse model response)';
     
@@ -545,6 +558,7 @@ Pebble.addEventListener('appmessage', function(e) {
     if (err) {
       console.log('Error: ' + err);
       sendToWatch({ 'STATUS': 'Error: ' + err.substring(0, 40) });
+      sendToWatch({ 'REPLY_END': 1 }); // 确保手表退出 THINKING 状态，不会永久卡死
       return;
     }
     // 如果流式没有输出任何成功内容（被非流式返回），则兜底重新发送整个回复。
