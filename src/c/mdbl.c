@@ -245,20 +245,28 @@ static void draw_wi_logo(GContext *ctx, int cx, int cy, int scale,
   int mt = LOGO_MORPH_TOTAL;
   int ring_r = 28 * keep / 100;
 
-  // W 的 9 个控制点
-  int logo_x[] = { -28, -22, -14, -6, 0, 6, 14, 20, 26 };
-  int logo_y[] = { -20, -6, 14, -3, -12, -3, 14, -6, -20 };
+  // W 的 9 个控制点（static const 避免栈分配）
+  static const int logo_x[] = { -28, -22, -14, -6, 0, 6, 14, 20, 26 };
+  static const int logo_y[] = { -20, -6, 14, -3, -12, -3, 14, -6, -20 };
 
   GPoint pts[9];
-  for (int i = 0; i < 9; i++) {
-    int lx = logo_x[i] * keep / 100;
-    int ly = logo_y[i] * keep / 100;
-    int deg = 200 + i * 160 / 8;
-    int32_t angle = (deg * TRIG_MAX_ANGLE) / 360;
-    int rx = (sin_lookup(angle) * ring_r) / TRIG_MAX_RATIO;
-    int ry = -(cos_lookup(angle) * ring_r) / TRIG_MAX_RATIO;
-    pts[i] = GPoint(cx + lx + (rx - lx) * m / mt,
-                    cy + ly + (ry - ly) * m / mt);
+  if (m == 0) {
+    // 无 morph，直接用 logo 坐标，跳过三角函数
+    for (int i = 0; i < 9; i++) {
+      pts[i] = GPoint(cx + logo_x[i] * keep / 100,
+                      cy + logo_y[i] * keep / 100);
+    }
+  } else {
+    for (int i = 0; i < 9; i++) {
+      int lx = logo_x[i] * keep / 100;
+      int ly = logo_y[i] * keep / 100;
+      int deg = 200 + i * 160 / 8;
+      int32_t angle = (deg * TRIG_MAX_ANGLE) / 360;
+      int rx = (sin_lookup(angle) * ring_r) / TRIG_MAX_RATIO;
+      int ry = -(cos_lookup(angle) * ring_r) / TRIG_MAX_RATIO;
+      pts[i] = GPoint(cx + lx + (rx - lx) * m / mt,
+                      cy + ly + (ry - ly) * m / mt);
+    }
   }
 
   // i 的竖线和圆点 — 与 W 右斜线平行（dx=6,dy=-14 方向）
@@ -272,7 +280,11 @@ static void draw_wi_logo(GContext *ctx, int cx, int cy, int scale,
   int i_dot_lx = (i_base_x + i_dx + 2) * keep / 100;  // 圆点在顶部再上方
   int i_dot_ly = (i_base_y + i_dy - 6) * keep / 100;
   GPoint i_top, i_bot, i_dot;
-  {
+  if (m == 0) {
+    i_top = GPoint(cx + i_top_lx, cy + i_top_ly);
+    i_bot = GPoint(cx + i_bot_lx, cy + i_bot_ly);
+    i_dot = GPoint(cx + i_dot_lx, cy + i_dot_ly);
+  } else {
     int32_t a; int rx, ry;
     a = (120 * TRIG_MAX_ANGLE) / 360;
     rx = (sin_lookup(a) * ring_r) / TRIG_MAX_RATIO;
@@ -643,6 +655,13 @@ static void anim_tick(void *data) {
   if (s_state == STATE_SHRINKING || s_state == STATE_EXPANDING) interval = 25;  // 40fps
   if (s_state == STATE_IDLE_NO_KEY || s_state == STATE_IDLE_READY) {
     interval = 200;  // 5fps（心跳动效，省电）
+    // 30 秒后停止动画省电（150帧 × 200ms）
+    if (s_anim_frame > 150) {
+      s_heartbeat = 0;
+      layer_mark_dirty(s_canvas_layer);  // 最后一帧重绘为静态
+      s_anim_timer = NULL;
+      return;
+    }
   }
   s_anim_timer = app_timer_register(interval, anim_tick, NULL);
 }
@@ -1306,6 +1325,7 @@ static void menu_select_click(MenuLayer *menu, MenuIndex *idx, void *ctx) {
 }
 
 // 菜单顶部色彩条纹绘制回调
+static Layer *s_menu_bar_layer = NULL;
 static void menu_bar_draw(Layer *layer, GContext *ctx) {
   draw_color_bar(ctx);
 }
@@ -1330,12 +1350,16 @@ static void list_window_load(Window *window) {
   layer_add_child(root, menu_layer_get_layer(s_menu_layer));
 
   // 顶部色彩条纹（叠加在菜单上方）
-  Layer *bar = layer_create(GRect(0, 0, bounds.size.w, 3));
-  layer_set_update_proc(bar, menu_bar_draw);
-  layer_add_child(root, bar);
+  s_menu_bar_layer = layer_create(GRect(0, 0, bounds.size.w, 3));
+  layer_set_update_proc(s_menu_bar_layer, menu_bar_draw);
+  layer_add_child(root, s_menu_bar_layer);
 }
 
 static void list_window_unload(Window *window) {
+  if (s_menu_bar_layer) {
+    layer_destroy(s_menu_bar_layer);
+    s_menu_bar_layer = NULL;
+  }
   menu_layer_destroy(s_menu_layer);
   s_menu_layer = NULL;
 }
