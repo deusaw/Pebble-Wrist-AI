@@ -238,6 +238,7 @@ static void draw_wi_logo(GContext *ctx, int cx, int cy, int scale,
   int m = morph;
   int mt = LOGO_MORPH_TOTAL;
   int ring_r = 28 * keep / 100;
+  int sw = (keep < 50) ? 2 : 5;  // 小尺寸用细线条
 
   // W 的 9 个控制点（static const 避免栈分配）
   static const int logo_x[] = { -28, -22, -14, -6, 0, 6, 14, 20, 26 };
@@ -301,7 +302,7 @@ static void draw_wi_logo(GContext *ctx, int cx, int cy, int scale,
   if (shadow) {
     int sx = 2, sy = 2;
     graphics_context_set_stroke_color(ctx, C_SHADOW);
-    graphics_context_set_stroke_width(ctx, 5);
+    graphics_context_set_stroke_width(ctx, sw);
     for (int i = 0; i < 8; i++)
       graphics_draw_line(ctx, GPoint(pts[i].x+sx, pts[i].y+sy),
                               GPoint(pts[i+1].x+sx, pts[i+1].y+sy));
@@ -331,12 +332,12 @@ static void draw_wi_logo(GContext *ctx, int cx, int cy, int scale,
 
   // 主线条
   graphics_context_set_stroke_color(ctx, color);
-  graphics_context_set_stroke_width(ctx, 5);
+  graphics_context_set_stroke_width(ctx, sw);
   for (int i = 0; i < 8; i++)
     graphics_draw_line(ctx, pts[i], pts[i + 1]);
 
-  // 蓝色横线（W 内形成 A 的横杠，居中在左 V 谷中间）
-  if (m < mt * 2 / 3) {
+  // 蓝色横线（W 内形成 A 的横杠）— 小尺寸下省略
+  if (m < mt * 2 / 3 && keep >= 50) {
     graphics_context_set_stroke_color(ctx, GColorPictonBlue);
     graphics_context_set_stroke_width(ctx, 2);
     // 横线在 W 左 V 的中间高度（pts[0]和pts[2]之间，约 y=0 处）
@@ -346,7 +347,7 @@ static void draw_wi_logo(GContext *ctx, int cx, int cy, int scale,
     int bar_x2 = cx + (-4) * keep / 100;
     graphics_draw_line(ctx, GPoint(bar_x1, bar_y), GPoint(bar_x2, bar_y));
     graphics_context_set_stroke_color(ctx, color);
-    graphics_context_set_stroke_width(ctx, 5);
+    graphics_context_set_stroke_width(ctx, sw);
   }
 
   // i 竖线

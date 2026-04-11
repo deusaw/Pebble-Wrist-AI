@@ -35,7 +35,14 @@
       "SWITCH_MODEL"
     ],
     "resources": {
-      "media": []
+      "media": [
+        {
+          "type": "bitmap",
+          "name": "IMAGE_APP_ICON",
+          "file": "images/icon_app.png",
+          "menuIcon": true
+        }
+      ]
     }
   }
 }

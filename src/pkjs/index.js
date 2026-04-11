@@ -707,5 +707,26 @@ Pebble.addEventListener('ready', function() {
     localStorage.removeItem('conversation_history');
   }
 
+  // 每次启动默认进入新对话（但不重复创建空白对话）
+  var store = loadStore();
+  var activeChat = getActiveChat(store);
+  if (!activeChat || activeChat.messages.length > 0) {
+    // 当前没有活跃对话或活跃对话已有消息 → 找现有空白对话复用
+    var emptyChat = null;
+    for (var i = store.chats.length - 1; i >= 0; i--) {
+      if (store.chats[i].messages.length === 0) {
+        emptyChat = store.chats[i];
+        break;
+      }
+    }
+    if (emptyChat) {
+      store.active_id = emptyChat.id;
+      saveStore(store);
+    } else {
+      createNewChat(store);
+    }
+  }
+  // else: 活跃对话已是空白的 → 不重复创建
+
   sendReadyStatus();
 });
