@@ -47,15 +47,15 @@ static AppState s_state = STATE_IDLE_NO_KEY;
 #define C_DOT_ON      GColorBlue
 #define C_DOT_OFF     GColorLightGray
 
-// ── 滩涂海浪背景 ─────────────────────────────────────────────────────────────
-// 6 层海浪色带，每次启动随机从调色板中选取
-#define WAVE_LAYERS 6
+// ── 冰淇淋层叠背景 ──────────────────────────────────────────────────────────
+// 5 层彩色波浪铺满全屏，启动时预计算波形，之后静态绘制
+#define WAVE_LAYERS 5
+#define WAVE_PTS 18           // 每层波浪边缘采样点数（每 8px 一个）
 static GColor s_wave_colors[WAVE_LAYERS];
-static int s_wave_offsets[WAVE_LAYERS];   // 每层波浪的水平相位偏移（随机）
-static int s_wave_amp[WAVE_LAYERS];       // 每层波浪振幅（随机 3~8）
+static int s_wave_edge[WAVE_LAYERS][WAVE_PTS]; // 预计算的波浪边缘 Y 坐标
 
-// 彩虹脉冲（thinking 时向上涌动）
-static int s_pulse_offset = 0;           // thinking 脉冲偏移量
+// 彩虹脉冲（thinking 时波浪微动）
+static int s_wave_shift = 0;              // thinking 时波浪 Y 偏移
 
 // 调色板：暖色滩涂系（Pebble 64 色中挑选的柔和色）
 static const GColor s_palette[] = {
@@ -95,11 +95,11 @@ static int s_circle_target_x;// 收缩动画的目标 X
 static int s_morph_step;     // 缩放动画步数
 #define MORPH_TOTAL 18       // 动画总帧数
 
-static int s_pulse_phase = 0;        // 动画相位（海浪波浪 + 动画共用）
-static int s_logo_draw_phase = 0;    // logo 描绘动画相位（进入 idle 时笔画逐段出现）
+static int s_pulse_phase = 0;        // 动画相位（心跳 + 动画共用）
 static int s_arc_angle = 0;          // thinking 旋转弧线角度
 static int s_logo_morph = 0;         // Wi→圆 变形进度 (0=Wi logo, 16=完整圆环)
 #define LOGO_MORPH_TOTAL 16
+static int s_heartbeat = 0;          // 心跳偏移 (±2px)
 
 static bool s_user_scrolled = false;  // 用户手动滚动过则停止自动滚动到底部
 
@@ -220,180 +220,147 @@ static int ease_out(int from, int to, int step, int total) {
 // 绘制辅助
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// 滩涂海浪背景：多层彩色波浪由上至下铺满屏幕
-// pulse_up: >0 时波浪整体向上偏移（thinking 脉冲效果）
-static void draw_wave_bg(GContext *ctx, int pulse_up) {
-  int layer_h = s_height / WAVE_LAYERS;
-  for (int i = 0; i < WAVE_LAYERS; i++) {
-    int base_y = i * layer_h - pulse_up;
-    GColor c = s_wave_colors[i];
-    graphics_context_set_fill_color(ctx, c);
-
-    // 先填充该层的矩形主体
-    int fill_y = (base_y < 0) ? 0 : base_y;
-    int fill_h = layer_h + s_wave_amp[i] + 2;
-    if (fill_y + fill_h > s_height) fill_h = s_height - fill_y;
-    if (fill_h > 0) {
-      graphics_fill_rect(ctx, GRect(0, fill_y, s_width, fill_h), 0, GCornerNone);
+// 冰淇淋层叠背景：5 层彩色波浪，预计算波形，静态绘制
+// wave_dy: thinking 时的微动偏移
+static void draw_wave_bg(GContext *ctx, int wave_dy) {
+  // 从底层往上画（后画的覆盖前画的）
+  for (int i = WAVE_LAYERS - 1; i >= 0; i--) {
+    graphics_context_set_fill_color(ctx, s_wave_colors[i]);
+    // 每层的基准 Y
+    int base_y = s_wave_edge[i][0] + wave_dy;
+    // 先填充从波浪最高点到屏幕底部的矩形
+    int min_y = s_height;
+    for (int p = 0; p < WAVE_PTS; p++) {
+      int ey = s_wave_edge[i][p] + wave_dy;
+      if (ey < min_y) min_y = ey;
     }
-
-    // 波浪曲线：在层顶部用 sin 波画锯齿边缘
-    int wave_y_base = base_y;
-    int amp = s_wave_amp[i];
-    int phase = s_wave_offsets[i] + s_pulse_phase * (i + 1);
-    for (int x = 0; x < s_width; x++) {
-      int32_t angle = ((x * 3 + phase) % 360) * TRIG_MAX_ANGLE / 360;
-      int wave_dy = (sin_lookup(angle) * amp) / TRIG_MAX_RATIO;
-      int wy = wave_y_base + wave_dy;
-      if (wy >= 0 && wy < s_height) {
-        // 画从波浪线到层底部的竖线来填充波浪形状
-        int bottom = base_y + layer_h + amp;
-        if (bottom > s_height) bottom = s_height;
-        if (wy < bottom) {
-          graphics_draw_line(ctx, GPoint(x, wy), GPoint(x, bottom));
+    if (min_y < 0) min_y = 0;
+    graphics_fill_rect(ctx, GRect(0, min_y, s_width, s_height - min_y), 0, GCornerNone);
+    // 用宽条填充波浪边缘（每 WAVE_PTS 段之间插值）
+    int step_w = (s_width + WAVE_PTS - 2) / (WAVE_PTS - 1);
+    for (int p = 0; p < WAVE_PTS - 1; p++) {
+      int x1 = p * step_w;
+      int x2 = (p + 1) * step_w;
+      int y1 = s_wave_edge[i][p] + wave_dy;
+      int y2 = s_wave_edge[i][p + 1] + wave_dy;
+      // 用竖条近似填充梯形
+      for (int x = x1; x < x2 && x < s_width; x++) {
+        int y = y1 + (y2 - y1) * (x - x1) / step_w;
+        if (y < min_y && y >= 0) {
+          graphics_draw_line(ctx, GPoint(x, y), GPoint(x, min_y));
         }
       }
     }
   }
 }
 
-// Wi logo 路径绘制（放大版，白色手写风格 + 阴影）
-// scale: 缩放百分比 (100=全尺寸, 用于缩小版)
-// morph: 0=纯 Wi logo, LOGO_MORPH_TOTAL=完全变成圆环
-// shadow: 是否画阴影
-static void draw_wi_logo(GContext *ctx, int cx, int cy, int scale, int draw_phase,
-                          int morph, GColor color, bool shadow) {
-  int keep = scale;
-  int m = morph;  // 0..LOGO_MORPH_TOTAL
+// Wi logo 路径绘制
+// scale: 缩放百分比 (100=全尺寸)
+// morph: 0=Wi logo, LOGO_MORPH_TOTAL=完整圆环
+// heartbeat: 心跳偏移像素 (±2)
+static void draw_wi_logo(GContext *ctx, int cx, int cy, int scale,
+                          int morph, GColor color, bool shadow, int heartbeat) {
+  int keep = scale + heartbeat;  // 心跳影响整体缩放
+  if (keep < 10) keep = 10;
+  int m = morph;
   int mt = LOGO_MORPH_TOTAL;
-  // 圆环半径（morph 目标）
   int ring_r = 28 * keep / 100;
 
-  // Wi logo 的 9 个控制点（相对坐标）
+  // W 的 9 个控制点
   int logo_x[] = { -28, -22, -14, -6, 0, 6, 14, 20, 26 };
   int logo_y[] = { -20, -6, 14, -3, -12, -3, 14, -6, -20 };
-  // 圆环上 9 个等距点（角度 0~320°，间隔 40°）
-  // 加上 i 的竖线端点(2个) + 圆点(1个) = 共 12 个点
-  // 但为了简洁，W 的 9 个点 morph 到圆环上 9 个等距位置
 
-  // 计算 morph 后的实际坐标
   GPoint pts[9];
   for (int i = 0; i < 9; i++) {
     int lx = logo_x[i] * keep / 100;
     int ly = logo_y[i] * keep / 100;
-    // 圆环目标位置：9 个等距点，从顶部偏左开始
-    int deg = 200 + i * 160 / 8;  // 200°~360°（底部弧线）
+    int deg = 200 + i * 160 / 8;
     int32_t angle = (deg * TRIG_MAX_ANGLE) / 360;
     int rx = (sin_lookup(angle) * ring_r) / TRIG_MAX_RATIO;
     int ry = -(cos_lookup(angle) * ring_r) / TRIG_MAX_RATIO;
-    // 线性插值
-    int fx = cx + lx + (rx - lx) * m / mt;
-    int fy = cy + ly + (ry - ly) * m / mt;
-    pts[i] = GPoint(fx, fy);
+    pts[i] = GPoint(cx + lx + (rx - lx) * m / mt,
+                    cy + ly + (ry - ly) * m / mt);
   }
 
-  // i 的竖线端点
+  // i 的竖线和圆点 morph 目标
   int i_top_lx = 32 * keep / 100, i_top_ly = -6 * keep / 100;
   int i_bot_lx = 32 * keep / 100, i_bot_ly = 14 * keep / 100;
   int i_dot_lx = 32 * keep / 100, i_dot_ly = -14 * keep / 100;
-  // 圆环目标：i 的三个点 morph 到圆环顶部弧段
-  int i_top_deg = 120, i_bot_deg = 160, i_dot_deg = 80;
   GPoint i_top, i_bot, i_dot;
   {
-    int32_t a;
-    int rx, ry;
-    a = (i_top_deg * TRIG_MAX_ANGLE) / 360;
+    int32_t a; int rx, ry;
+    a = (120 * TRIG_MAX_ANGLE) / 360;
     rx = (sin_lookup(a) * ring_r) / TRIG_MAX_RATIO;
     ry = -(cos_lookup(a) * ring_r) / TRIG_MAX_RATIO;
     i_top = GPoint(cx + i_top_lx + (rx - i_top_lx) * m / mt,
                    cy + i_top_ly + (ry - i_top_ly) * m / mt);
-
-    a = (i_bot_deg * TRIG_MAX_ANGLE) / 360;
+    a = (160 * TRIG_MAX_ANGLE) / 360;
     rx = (sin_lookup(a) * ring_r) / TRIG_MAX_RATIO;
     ry = -(cos_lookup(a) * ring_r) / TRIG_MAX_RATIO;
     i_bot = GPoint(cx + i_bot_lx + (rx - i_bot_lx) * m / mt,
                    cy + i_bot_ly + (ry - i_bot_ly) * m / mt);
-
-    a = (i_dot_deg * TRIG_MAX_ANGLE) / 360;
+    a = (80 * TRIG_MAX_ANGLE) / 360;
     rx = (sin_lookup(a) * ring_r) / TRIG_MAX_RATIO;
     ry = -(cos_lookup(a) * ring_r) / TRIG_MAX_RATIO;
     i_dot = GPoint(cx + i_dot_lx + (rx - i_dot_lx) * m / mt,
                    cy + i_dot_ly + (ry - i_dot_ly) * m / mt);
   }
 
-  // 阴影层
+  // 阴影
   if (shadow) {
     int sx = 2, sy = 2;
     graphics_context_set_stroke_color(ctx, C_SHADOW);
     graphics_context_set_stroke_width(ctx, 5);
-    int sw_segs = (draw_phase >= 16) ? 8 : (draw_phase * 8 / 16);
-    for (int i = 0; i < sw_segs; i++) {
+    for (int i = 0; i < 8; i++)
       graphics_draw_line(ctx, GPoint(pts[i].x+sx, pts[i].y+sy),
                               GPoint(pts[i+1].x+sx, pts[i+1].y+sy));
-    }
-    if (draw_phase >= 14) {
-      graphics_draw_line(ctx, GPoint(i_top.x+sx, i_top.y+sy),
-                              GPoint(i_bot.x+sx, i_bot.y+sy));
-    }
-    if (draw_phase >= 18) {
+    graphics_draw_line(ctx, GPoint(i_top.x+sx, i_top.y+sy),
+                            GPoint(i_bot.x+sx, i_bot.y+sy));
+    int dr = 3 * keep / 100;
+    dr = dr * (mt - m) / mt;
+    if (dr > 0) {
       graphics_context_set_fill_color(ctx, C_SHADOW);
-      int dr = (3 * keep / 100);
-      // morph 时圆点变小
-      dr = dr * (mt - m) / mt + 1;
-      graphics_fill_circle(ctx, GPoint(i_dot.x+sx, i_dot.y+sy), dr > 0 ? dr : 1);
+      graphics_fill_circle(ctx, GPoint(i_dot.x+sx, i_dot.y+sy), dr);
     }
-    // morph 时补画圆环的上半弧阴影（W 的 9 个点只覆盖下半弧）
+    // morph 时补画上半弧阴影
     if (m > mt / 3) {
-      int arc_opacity = (m - mt / 3) * 100 / (mt - mt / 3);  // 0~100 渐入
-      if (arc_opacity > 0) {
-        graphics_context_set_stroke_width(ctx, 3 + arc_opacity * 2 / 100);
-        for (int seg = 0; seg < 8; seg++) {
-          int d1 = 10 + seg * 190 / 8;
-          int d2 = 10 + (seg + 1) * 190 / 8;
-          int32_t a1 = (d1 * TRIG_MAX_ANGLE) / 360;
-          int32_t a2 = (d2 * TRIG_MAX_ANGLE) / 360;
-          int x1 = cx + sx + (sin_lookup(a1) * ring_r) / TRIG_MAX_RATIO;
-          int y1 = cy + sy - (cos_lookup(a1) * ring_r) / TRIG_MAX_RATIO;
-          int x2 = cx + sx + (sin_lookup(a2) * ring_r) / TRIG_MAX_RATIO;
-          int y2 = cy + sy - (cos_lookup(a2) * ring_r) / TRIG_MAX_RATIO;
-          graphics_draw_line(ctx, GPoint(x1, y1), GPoint(x2, y2));
-        }
+      for (int seg = 0; seg < 6; seg++) {
+        int d1 = 10 + seg * 190 / 6;
+        int d2 = 10 + (seg + 1) * 190 / 6;
+        int32_t a1 = (d1 * TRIG_MAX_ANGLE) / 360;
+        int32_t a2 = (d2 * TRIG_MAX_ANGLE) / 360;
+        graphics_draw_line(ctx,
+          GPoint(cx+sx + (sin_lookup(a1)*ring_r)/TRIG_MAX_RATIO,
+                 cy+sy - (cos_lookup(a1)*ring_r)/TRIG_MAX_RATIO),
+          GPoint(cx+sx + (sin_lookup(a2)*ring_r)/TRIG_MAX_RATIO,
+                 cy+sy - (cos_lookup(a2)*ring_r)/TRIG_MAX_RATIO));
       }
     }
   }
 
-  // 主 logo / 变形中的线条
+  // 主线条
   graphics_context_set_stroke_color(ctx, color);
   graphics_context_set_stroke_width(ctx, 5);
-
-  int w_segs = (draw_phase >= 16) ? 8 : (draw_phase * 8 / 16);
-  for (int i = 0; i < w_segs; i++) {
+  for (int i = 0; i < 8; i++)
     graphics_draw_line(ctx, pts[i], pts[i + 1]);
-  }
 
-  // 蓝色小三角装饰（morph 时渐隐）
-  if (draw_phase >= 12 && m < mt * 2 / 3) {
+  // 蓝色横线（W 内形成 A 的横杠，morph 时渐隐）
+  if (m < mt * 2 / 3) {
     graphics_context_set_stroke_color(ctx, GColorPictonBlue);
     graphics_context_set_stroke_width(ctx, 2);
-    int tri_keep = keep * (mt - m) / mt;  // morph 时缩小
-    int tlx = cx + (-9) * tri_keep / 100;
-    int trx = cx + (-3) * tri_keep / 100;
-    int tty = cy + 11 * tri_keep / 100;
-    int tbx = cx + (-6) * tri_keep / 100;
-    int tby = cy + 16 * tri_keep / 100;
-    graphics_draw_line(ctx, GPoint(tlx, tty), GPoint(tbx, tby));
-    graphics_draw_line(ctx, GPoint(trx, tty), GPoint(tbx, tby));
+    int bar_y = cy + 2 * keep / 100;
+    int bar_x1 = cx + (-12) * keep / 100;
+    int bar_x2 = cx + (-2) * keep / 100;
+    graphics_draw_line(ctx, GPoint(bar_x1, bar_y), GPoint(bar_x2, bar_y));
     graphics_context_set_stroke_color(ctx, color);
     graphics_context_set_stroke_width(ctx, 5);
   }
 
   // i 竖线
-  if (draw_phase >= 14) {
-    graphics_draw_line(ctx, i_top, i_bot);
-  }
+  graphics_draw_line(ctx, i_top, i_bot);
 
-  // i 圆点（morph 时缩小消失）
-  if (draw_phase >= 18) {
+  // i 圆点（morph 时缩小）
+  {
     int dot_r = 3 * keep / 100;
     dot_r = dot_r * (mt - m) / mt;
     if (dot_r > 0) {
@@ -402,56 +369,46 @@ static void draw_wi_logo(GContext *ctx, int cx, int cy, int scale, int draw_phas
     }
   }
 
-  // morph 时补画圆环的上半弧（W 的 9 个点只覆盖下半弧 200°~360°）
+  // morph 时补画上半弧
   if (m > mt / 3) {
-    int arc_opacity = (m - mt / 3) * 100 / (mt - mt / 3);
-    if (arc_opacity > 0) {
-      graphics_context_set_stroke_width(ctx, 3 + arc_opacity * 2 / 100);
-      for (int seg = 0; seg < 8; seg++) {
-        int d1 = 10 + seg * 190 / 8;
-        int d2 = 10 + (seg + 1) * 190 / 8;
-        int32_t a1 = (d1 * TRIG_MAX_ANGLE) / 360;
-        int32_t a2 = (d2 * TRIG_MAX_ANGLE) / 360;
-        int x1 = cx + (sin_lookup(a1) * ring_r) / TRIG_MAX_RATIO;
-        int y1 = cy - (cos_lookup(a1) * ring_r) / TRIG_MAX_RATIO;
-        int x2 = cx + (sin_lookup(a2) * ring_r) / TRIG_MAX_RATIO;
-        int y2 = cy - (cos_lookup(a2) * ring_r) / TRIG_MAX_RATIO;
-        graphics_draw_line(ctx, GPoint(x1, y1), GPoint(x2, y2));
-      }
+    graphics_context_set_stroke_width(ctx, 4);
+    for (int seg = 0; seg < 6; seg++) {
+      int d1 = 10 + seg * 190 / 6;
+      int d2 = 10 + (seg + 1) * 190 / 6;
+      int32_t a1 = (d1 * TRIG_MAX_ANGLE) / 360;
+      int32_t a2 = (d2 * TRIG_MAX_ANGLE) / 360;
+      graphics_draw_line(ctx,
+        GPoint(cx + (sin_lookup(a1)*ring_r)/TRIG_MAX_RATIO,
+               cy - (cos_lookup(a1)*ring_r)/TRIG_MAX_RATIO),
+        GPoint(cx + (sin_lookup(a2)*ring_r)/TRIG_MAX_RATIO,
+               cy - (cos_lookup(a2)*ring_r)/TRIG_MAX_RATIO));
     }
   }
 }
 
-// 大旋转弧线圆（thinking 状态，带阴影）
+// 大旋转弧线圆（thinking 状态，轻微旋转弧线 + 阴影）
 static void draw_spin_circle(GContext *ctx, int cx, int cy, int r, GColor color, bool shadow) {
-  // 阴影
   if (shadow) {
     graphics_context_set_stroke_color(ctx, C_SHADOW);
     graphics_context_set_stroke_width(ctx, 4);
     graphics_draw_circle(ctx, GPoint(cx + 2, cy + 2), r);
   }
-
-  // 主圆环
   graphics_context_set_stroke_color(ctx, color);
   graphics_context_set_stroke_width(ctx, 3);
   graphics_draw_circle(ctx, GPoint(cx, cy), r);
 
-  // 旋转弧线：两段 90° 弧，对称分布
+  // 一段 60° 旋转弧线（轻微）
   graphics_context_set_stroke_width(ctx, 5);
-  int arc_segments = 10;
-  for (int a = 0; a < 2; a++) {
-    int base = s_arc_angle + a * 180;
-    for (int i = 0; i < arc_segments; i++) {
-      int deg1 = base + (i * 90 / arc_segments);
-      int deg2 = base + ((i + 1) * 90 / arc_segments);
-      int32_t a1 = (deg1 * TRIG_MAX_ANGLE) / 360;
-      int32_t a2 = (deg2 * TRIG_MAX_ANGLE) / 360;
-      int x1 = cx + (sin_lookup(a1) * r) / TRIG_MAX_RATIO;
-      int y1 = cy - (cos_lookup(a1) * r) / TRIG_MAX_RATIO;
-      int x2 = cx + (sin_lookup(a2) * r) / TRIG_MAX_RATIO;
-      int y2 = cy - (cos_lookup(a2) * r) / TRIG_MAX_RATIO;
-      graphics_draw_line(ctx, GPoint(x1, y1), GPoint(x2, y2));
-    }
+  for (int i = 0; i < 4; i++) {
+    int deg1 = s_arc_angle + i * 60 / 4;
+    int deg2 = s_arc_angle + (i + 1) * 60 / 4;
+    int32_t a1 = (deg1 * TRIG_MAX_ANGLE) / 360;
+    int32_t a2 = (deg2 * TRIG_MAX_ANGLE) / 360;
+    graphics_draw_line(ctx,
+      GPoint(cx + (sin_lookup(a1)*r)/TRIG_MAX_RATIO,
+             cy - (cos_lookup(a1)*r)/TRIG_MAX_RATIO),
+      GPoint(cx + (sin_lookup(a2)*r)/TRIG_MAX_RATIO,
+             cy - (cos_lookup(a2)*r)/TRIG_MAX_RATIO));
   }
 }
 
@@ -523,7 +480,7 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
       // 滩涂海浪背景（静态）
       draw_wave_bg(ctx, 0);
       // Wi logo（灰暗色调表示未就绪）
-      draw_wi_logo(ctx, cx, cy, 100, s_logo_draw_phase, 0, GColorLightGray, true);
+      draw_wi_logo(ctx, cx, cy, 100, 0, GColorLightGray, true, s_heartbeat);
       draw_text(ctx, "Set API in Pebble app", font_small, s_subtitle_y, GColorWhite);
       break;
 
@@ -531,7 +488,7 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
       // 滩涂海浪背景
       draw_wave_bg(ctx, 0);
       // 白色 Wi logo 带阴影
-      draw_wi_logo(ctx, cx, cy, 100, s_logo_draw_phase, 0, GColorWhite, true);
+      draw_wi_logo(ctx, cx, cy, 100, 0, GColorWhite, true, s_heartbeat);
       {
         const char *title = (s_active_chat_index >= 0 && s_active_chat_index < s_chat_count) ? s_chat_entries[s_active_chat_index].title : "New chat";
         draw_text(ctx, title, font_sub, s_subtitle_y, GColorWhite);
@@ -541,7 +498,7 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
     case STATE_RECORDING:
       // Wi 正在 morph 成圆 + 跳动圆点叠加
       draw_wave_bg(ctx, 0);
-      draw_wi_logo(ctx, cx, cy, 100, 20, s_logo_morph, GColorWhite, true);
+      draw_wi_logo(ctx, cx, cy, 100, s_logo_morph, GColorWhite, true, 0);
       if (s_logo_morph >= LOGO_MORPH_TOTAL) {
         draw_dots(ctx, cx, cy);
       }
@@ -551,7 +508,7 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
     case STATE_SENDING:
       // Wi morph 成圆 + 箭头叠加
       draw_wave_bg(ctx, 0);
-      draw_wi_logo(ctx, cx, cy, 100, 20, s_logo_morph, GColorWhite, true);
+      draw_wi_logo(ctx, cx, cy, 100, s_logo_morph, GColorWhite, true, 0);
       if (s_logo_morph >= LOGO_MORPH_TOTAL) {
         draw_arrow(ctx, cx, cy);
       }
@@ -560,7 +517,7 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
 
     case STATE_THINKING: {
       // 彩虹向上脉冲背景
-      draw_wave_bg(ctx, s_pulse_offset);
+      draw_wave_bg(ctx, s_wave_shift);
       // 大旋转弧线圆（带阴影）
       int spin_r = s_circle_r_big - 4;
       draw_spin_circle(ctx, cx, cy, spin_r, GColorWhite, true);
@@ -573,8 +530,8 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
       draw_wave_bg(ctx, 0);
       int logo_scale = s_circle_r * 100 / s_circle_r_big;
       if (logo_scale < 25) logo_scale = 25;
-      draw_wi_logo(ctx, s_circle_x, s_circle_y, logo_scale, 20,
-                   s_logo_morph, GColorWhite, logo_scale > 40);
+      draw_wi_logo(ctx, s_circle_x, s_circle_y, logo_scale,
+                   s_logo_morph, GColorWhite, logo_scale > 40, 0);
       break;
     }
 
@@ -598,7 +555,7 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
       int start_x = (s_width - total_w) / 2;
       int wi_cx = start_x + wi_w / 2;
       // 画缩小版 Wi logo
-      draw_wi_logo(ctx, wi_cx, CIRCLE_Y_SMALL, 30, 20, 0, GColorDarkGray, false);
+      draw_wi_logo(ctx, wi_cx, CIRCLE_Y_SMALL, 30, 0, GColorDarkGray, false, 0);
       // 标题
       graphics_context_set_text_color(ctx, GColorDarkGray);
       GRect title_box = GRect(start_x + wi_w + 5, CIRCLE_Y_SMALL - 7, title_size.w + 10, 20);
@@ -636,29 +593,35 @@ static void anim_tick(void *data) {
   s_anim_frame++;
   s_pulse_phase++;
 
-  // logo 描绘动画（idle 状态前 20 帧逐段出现）
-  if ((s_state == STATE_IDLE_NO_KEY || s_state == STATE_IDLE_READY) && s_logo_draw_phase < 20) {
-    s_logo_draw_phase++;
+  // 心跳动效（idle 状态，±2px 正弦脉冲）
+  if (s_state == STATE_IDLE_NO_KEY || s_state == STATE_IDLE_READY) {
+    int beat = s_pulse_phase % 20;
+    if (beat < 5) s_heartbeat = beat * 2 / 5;        // 0→2
+    else if (beat < 10) s_heartbeat = 2 - (beat-5)*2/5; // 2→0
+    else if (beat < 13) s_heartbeat = -(beat-10)*2/3;   // 0→-2
+    else if (beat < 16) s_heartbeat = -2 + (beat-13)*2/3; // -2→0
+    else s_heartbeat = 0;
+  } else {
+    s_heartbeat = 0;
   }
 
   // Wi→圆 morph 驱动
-  // RECORDING/SENDING/THINKING/SHRINKING: morph 递增（Wi→圆）
   if (s_state == STATE_RECORDING || s_state == STATE_SENDING ||
       s_state == STATE_THINKING || s_state == STATE_SHRINKING) {
     if (s_logo_morph < LOGO_MORPH_TOTAL) s_logo_morph++;
   }
-  // EXPANDING: morph 递减（圆→Wi）
   if (s_state == STATE_EXPANDING) {
     if (s_logo_morph > 0) s_logo_morph--;
   }
 
-  // thinking 旋转弧线 + 彩虹脉冲
+  // thinking: 轻微旋转弧线 + 波浪微动
   if (s_state == STATE_THINKING) {
-    s_arc_angle = (s_arc_angle + 8) % 360;
-    s_pulse_offset += 2;  // 背景向上涌动
-    if (s_pulse_offset > s_height) s_pulse_offset = 0;
+    s_arc_angle = (s_arc_angle + 3) % 360;
+    // 波浪微动：±3px 正弦
+    int w = s_pulse_phase % 30;
+    s_wave_shift = (w <= 15) ? (w * 3 / 15) : (3 - (w - 15) * 3 / 15);
   } else {
-    s_pulse_offset = 0;
+    s_wave_shift = 0;
   }
 
   if (s_state == STATE_SHRINKING) {
@@ -699,12 +662,7 @@ static void anim_tick(void *data) {
   int interval = 50;  // 默认 20fps
   if (s_state == STATE_SHRINKING || s_state == STATE_EXPANDING) interval = 25;  // 40fps
   if (s_state == STATE_IDLE_NO_KEY || s_state == STATE_IDLE_READY) {
-    interval = 100;  // 10fps
-    // logo 描绘完成后停止动画省电（25帧 × 100ms = 2.5s）
-    if (s_anim_frame > 25 && s_logo_draw_phase >= 20) {
-      s_anim_timer = NULL;
-      return;
-    }
+    interval = 200;  // 5fps（心跳动效，省电）
   }
   s_anim_timer = app_timer_register(interval, anim_tick, NULL);
 }
@@ -768,9 +726,8 @@ static void set_state(AppState new_state) {
   switch (new_state) {
     case STATE_IDLE_NO_KEY:
     case STATE_IDLE_READY:
-      s_logo_draw_phase = 0;  // 重新播放描绘动画
       s_logo_morph = 0;       // 重置为完整 Wi logo
-      s_pulse_offset = 0;
+      s_wave_shift = 0;
       start_anim();
       break;
     case STATE_RECORDING:
@@ -1122,12 +1079,23 @@ static void window_load(Window *window) {
   // 收缩动画时的圆心 X：圆形屏居中更协调，方形屏居左
   s_circle_target_x = PBL_IF_ROUND_ELSE(s_width / 2, 24);
 
-  // 随机初始化滩涂海浪背景
+  // 随机初始化冰淇淋层叠背景
   srand(time(NULL));
-  for (int i = 0; i < WAVE_LAYERS; i++) {
-    s_wave_colors[i] = s_palette[rand() % PALETTE_SIZE];
-    s_wave_offsets[i] = rand() % s_width;
-    s_wave_amp[i] = 3 + (rand() % 6);  // 振幅 3~8 像素
+  {
+    int layer_h = s_height / WAVE_LAYERS;
+    int step_w = (s_width + WAVE_PTS - 2) / (WAVE_PTS - 1);
+    for (int i = 0; i < WAVE_LAYERS; i++) {
+      s_wave_colors[i] = s_palette[rand() % PALETTE_SIZE];
+      int base_y = i * layer_h;
+      int amp = 4 + (rand() % 6);   // 振幅 4~9
+      int phase = rand() % 360;
+      for (int p = 0; p < WAVE_PTS; p++) {
+        int x = p * step_w;
+        int32_t angle = ((x * 3 + phase) % 360) * TRIG_MAX_ANGLE / 360;
+        int dy = (sin_lookup(angle) * amp) / TRIG_MAX_RATIO;
+        s_wave_edge[i][p] = base_y + dy;
+      }
+    }
   }
 
   // Canvas 层
