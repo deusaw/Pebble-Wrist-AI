@@ -47,15 +47,13 @@ static AppState s_state = STATE_IDLE_NO_KEY;
 #define C_DOT_ON      GColorBlue
 #define C_DOT_OFF     GColorLightGray
 
-// ── 冰淇淋层叠背景 ──────────────────────────────────────────────────────────
-// 5 层彩色波浪铺满全屏，启动时预计算波形，之后静态绘制
+// ── 背景 ─────────────────────────────────────────────────────────────────────
+// 每次启动随机纯色底 + 5 层色彩条纹（回复页/菜单页顶部装饰用）
 #define WAVE_LAYERS 5
-#define WAVE_PTS 18           // 每层波浪边缘采样点数（每 8px 一个）
-static GColor s_wave_colors[WAVE_LAYERS];
-static int s_wave_edge[WAVE_LAYERS][WAVE_PTS]; // 预计算的波浪边缘 Y 坐标
+static GColor s_wave_colors[WAVE_LAYERS]; // 5 层色彩条纹
+static GColor s_bg_color;                 // 主屏随机纯色底
 
-// 彩虹脉冲（thinking 时波浪微动）
-static int s_wave_shift = 0;              // thinking 时波浪 Y 偏移
+// 彩虹脉冲 — 已简化为纯色底，保留变量兼容
 
 // 调色板：暖色滩涂系（Pebble 64 色中挑选的柔和色）
 static const GColor s_palette[] = {
@@ -220,37 +218,18 @@ static int ease_out(int from, int to, int step, int total) {
 // 绘制辅助
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// 冰淇淋层叠背景：5 层彩色波浪，预计算波形，静态绘制
-// wave_dy: thinking 时的微动偏移
-static void draw_wave_bg(GContext *ctx, int wave_dy) {
-  // 从底层往上画（后画的覆盖前画的）
-  for (int i = WAVE_LAYERS - 1; i >= 0; i--) {
+// 纯色背景
+static void draw_bg(GContext *ctx) {
+  graphics_context_set_fill_color(ctx, s_bg_color);
+  graphics_fill_rect(ctx, GRect(0, 0, s_width, s_height), 0, GCornerNone);
+}
+
+// 顶部 5 层色彩条纹装饰（3px 高）
+static void draw_color_bar(GContext *ctx) {
+  int bar_w = s_width / WAVE_LAYERS;
+  for (int i = 0; i < WAVE_LAYERS; i++) {
     graphics_context_set_fill_color(ctx, s_wave_colors[i]);
-    // 每层的基准 Y
-    int base_y = s_wave_edge[i][0] + wave_dy;
-    // 先填充从波浪最高点到屏幕底部的矩形
-    int min_y = s_height;
-    for (int p = 0; p < WAVE_PTS; p++) {
-      int ey = s_wave_edge[i][p] + wave_dy;
-      if (ey < min_y) min_y = ey;
-    }
-    if (min_y < 0) min_y = 0;
-    graphics_fill_rect(ctx, GRect(0, min_y, s_width, s_height - min_y), 0, GCornerNone);
-    // 用宽条填充波浪边缘（每 WAVE_PTS 段之间插值）
-    int step_w = (s_width + WAVE_PTS - 2) / (WAVE_PTS - 1);
-    for (int p = 0; p < WAVE_PTS - 1; p++) {
-      int x1 = p * step_w;
-      int x2 = (p + 1) * step_w;
-      int y1 = s_wave_edge[i][p] + wave_dy;
-      int y2 = s_wave_edge[i][p + 1] + wave_dy;
-      // 用竖条近似填充梯形
-      for (int x = x1; x < x2 && x < s_width; x++) {
-        int y = y1 + (y2 - y1) * (x - x1) / step_w;
-        if (y < min_y && y >= 0) {
-          graphics_draw_line(ctx, GPoint(x, y), GPoint(x, min_y));
-        }
-      }
-    }
+    graphics_fill_rect(ctx, GRect(i * bar_w, 0, bar_w + 1, 3), 0, GCornerNone);
   }
 }
 
@@ -282,10 +261,16 @@ static void draw_wi_logo(GContext *ctx, int cx, int cy, int scale,
                     cy + ly + (ry - ly) * m / mt);
   }
 
-  // i 的竖线和圆点 morph 目标
-  int i_top_lx = 32 * keep / 100, i_top_ly = -6 * keep / 100;
-  int i_bot_lx = 32 * keep / 100, i_bot_ly = 14 * keep / 100;
-  int i_dot_lx = 32 * keep / 100, i_dot_ly = -14 * keep / 100;
+  // i 的竖线和圆点 — 与 W 右斜线平行（dx=6,dy=-14 方向）
+  // i 底部起点在 W 右端稍右，沿斜线方向向上延伸
+  int i_base_x = 30, i_base_y = 10;   // i 底部
+  int i_dx = 5, i_dy = -18;           // i 方向（与 W 右斜线平行）
+  int i_bot_lx = i_base_x * keep / 100;
+  int i_bot_ly = i_base_y * keep / 100;
+  int i_top_lx = (i_base_x + i_dx) * keep / 100;
+  int i_top_ly = (i_base_y + i_dy) * keep / 100;
+  int i_dot_lx = (i_base_x + i_dx + 2) * keep / 100;  // 圆点在顶部再上方
+  int i_dot_ly = (i_base_y + i_dy - 6) * keep / 100;
   GPoint i_top, i_bot, i_dot;
   {
     int32_t a; int rx, ry;
@@ -344,13 +329,15 @@ static void draw_wi_logo(GContext *ctx, int cx, int cy, int scale,
   for (int i = 0; i < 8; i++)
     graphics_draw_line(ctx, pts[i], pts[i + 1]);
 
-  // 蓝色横线（W 内形成 A 的横杠，morph 时渐隐）
+  // 蓝色横线（W 内形成 A 的横杠，居中在左 V 谷中间）
   if (m < mt * 2 / 3) {
     graphics_context_set_stroke_color(ctx, GColorPictonBlue);
     graphics_context_set_stroke_width(ctx, 2);
-    int bar_y = cy + 2 * keep / 100;
-    int bar_x1 = cx + (-12) * keep / 100;
-    int bar_x2 = cx + (-2) * keep / 100;
+    // 横线在 W 左 V 的中间高度（pts[0]和pts[2]之间，约 y=0 处）
+    int bar_y = cy + 0 * keep / 100;
+    // 横线从左臂中段到中峰过渡段
+    int bar_x1 = cx + (-16) * keep / 100;
+    int bar_x2 = cx + (-4) * keep / 100;
     graphics_draw_line(ctx, GPoint(bar_x1, bar_y), GPoint(bar_x2, bar_y));
     graphics_context_set_stroke_color(ctx, color);
     graphics_context_set_stroke_width(ctx, 5);
@@ -386,29 +373,35 @@ static void draw_wi_logo(GContext *ctx, int cx, int cy, int scale,
   }
 }
 
-// 大旋转弧线圆（thinking 状态，轻微旋转弧线 + 阴影）
-static void draw_spin_circle(GContext *ctx, int cx, int cy, int r, GColor color, bool shadow) {
+// thinking 大圆 + 旋转小圆点（规整画法）
+// opacity: 0=不可见, 16=完全可见（用于浮现效果）
+static void draw_spin_circle(GContext *ctx, int cx, int cy, int r,
+                              GColor color, bool shadow, int opacity) {
+  if (opacity <= 0) return;
+  // opacity < 16 时用灰色模拟半透明
+  GColor draw_c = (opacity >= 12) ? color : C_SHADOW;
+
   if (shadow) {
     graphics_context_set_stroke_color(ctx, C_SHADOW);
-    graphics_context_set_stroke_width(ctx, 4);
+    graphics_context_set_stroke_width(ctx, 3);
     graphics_draw_circle(ctx, GPoint(cx + 2, cy + 2), r);
   }
-  graphics_context_set_stroke_color(ctx, color);
-  graphics_context_set_stroke_width(ctx, 3);
+  // 主圆环
+  graphics_context_set_stroke_color(ctx, draw_c);
+  graphics_context_set_stroke_width(ctx, 2);
   graphics_draw_circle(ctx, GPoint(cx, cy), r);
 
-  // 一段 60° 旋转弧线（轻微）
-  graphics_context_set_stroke_width(ctx, 5);
-  for (int i = 0; i < 4; i++) {
-    int deg1 = s_arc_angle + i * 60 / 4;
-    int deg2 = s_arc_angle + (i + 1) * 60 / 4;
-    int32_t a1 = (deg1 * TRIG_MAX_ANGLE) / 360;
-    int32_t a2 = (deg2 * TRIG_MAX_ANGLE) / 360;
-    graphics_draw_line(ctx,
-      GPoint(cx + (sin_lookup(a1)*r)/TRIG_MAX_RATIO,
-             cy - (cos_lookup(a1)*r)/TRIG_MAX_RATIO),
-      GPoint(cx + (sin_lookup(a2)*r)/TRIG_MAX_RATIO,
-             cy - (cos_lookup(a2)*r)/TRIG_MAX_RATIO));
+  // 旋转小圆点（在圆环上滑动）
+  if (opacity >= 8) {
+    int32_t a = (s_arc_angle * TRIG_MAX_ANGLE) / 360;
+    int px = cx + (sin_lookup(a) * r) / TRIG_MAX_RATIO;
+    int py = cy - (cos_lookup(a) * r) / TRIG_MAX_RATIO;
+    if (shadow) {
+      graphics_context_set_fill_color(ctx, C_SHADOW);
+      graphics_fill_circle(ctx, GPoint(px + 1, py + 1), 4);
+    }
+    graphics_context_set_fill_color(ctx, color);
+    graphics_fill_circle(ctx, GPoint(px, py), 4);
   }
 }
 
@@ -478,7 +471,7 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
   switch (s_state) {
     case STATE_IDLE_NO_KEY:
       // 滩涂海浪背景（静态）
-      draw_wave_bg(ctx, 0);
+      draw_bg(ctx);
       // Wi logo（灰暗色调表示未就绪）
       draw_wi_logo(ctx, cx, cy, 100, 0, GColorLightGray, true, s_heartbeat);
       draw_text(ctx, "Set API in Pebble app", font_small, s_subtitle_y, GColorWhite);
@@ -486,7 +479,7 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
 
     case STATE_IDLE_READY:
       // 滩涂海浪背景
-      draw_wave_bg(ctx, 0);
+      draw_bg(ctx);
       // 白色 Wi logo 带阴影
       draw_wi_logo(ctx, cx, cy, 100, 0, GColorWhite, true, s_heartbeat);
       {
@@ -496,56 +489,48 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
       break;
 
     case STATE_RECORDING:
-      // Wi 正在 morph 成圆 + 跳动圆点叠加
-      draw_wave_bg(ctx, 0);
-      draw_wi_logo(ctx, cx, cy, 100, s_logo_morph, GColorWhite, true, 0);
-      if (s_logo_morph >= LOGO_MORPH_TOTAL) {
+      draw_bg(ctx);
+      // Wi 渐隐（morph 前半段画灰色，后半段不画）
+      if (s_logo_morph < LOGO_MORPH_TOTAL / 2)
+        draw_wi_logo(ctx, cx, cy, 100, 0, C_SHADOW, false, 0);
+      if (s_logo_morph >= LOGO_MORPH_TOTAL / 2)
         draw_dots(ctx, cx, cy);
-      }
       draw_text(ctx, "Listening...", font_small, s_subtitle_y, GColorWhite);
       break;
 
     case STATE_SENDING:
-      // Wi morph 成圆 + 箭头叠加
-      draw_wave_bg(ctx, 0);
-      draw_wi_logo(ctx, cx, cy, 100, s_logo_morph, GColorWhite, true, 0);
-      if (s_logo_morph >= LOGO_MORPH_TOTAL) {
+      draw_bg(ctx);
+      if (s_logo_morph < LOGO_MORPH_TOTAL / 2)
+        draw_wi_logo(ctx, cx, cy, 100, 0, C_SHADOW, false, 0);
+      if (s_logo_morph >= LOGO_MORPH_TOTAL / 2)
         draw_arrow(ctx, cx, cy);
-      }
       draw_text(ctx, "Sending...", font_small, s_subtitle_y, GColorWhite);
       break;
 
     case STATE_THINKING: {
-      // 彩虹向上脉冲背景
-      draw_wave_bg(ctx, s_wave_shift);
-      // 大旋转弧线圆（带阴影）
+      draw_bg(ctx);
       int spin_r = s_circle_r_big - 4;
-      draw_spin_circle(ctx, cx, cy, spin_r, GColorWhite, true);
+      draw_spin_circle(ctx, cx, cy, spin_r, GColorWhite, true, 16);
       draw_text(ctx, "Thinking...", font_small, s_subtitle_y, GColorWhite);
       break;
     }
 
     case STATE_SHRINKING:
     case STATE_EXPANDING: {
-      draw_wave_bg(ctx, 0);
+      draw_bg(ctx);
       int logo_scale = s_circle_r * 100 / s_circle_r_big;
       if (logo_scale < 25) logo_scale = 25;
-      draw_wi_logo(ctx, s_circle_x, s_circle_y, logo_scale,
-                   s_logo_morph, GColorWhite, logo_scale > 40, 0);
+      if (s_state == STATE_EXPANDING && s_logo_morph < LOGO_MORPH_TOTAL / 2)
+        draw_wi_logo(ctx, s_circle_x, s_circle_y, logo_scale, 0, GColorWhite, logo_scale > 40, 0);
+      else if (s_state == STATE_SHRINKING)
+        draw_wi_logo(ctx, s_circle_x, s_circle_y, logo_scale, 0, C_SHADOW, false, 0);
       break;
     }
 
     case STATE_RESPONSE: {
-      // 回复界面：白色背景 + 顶部小 Wi logo + 标题
       graphics_context_set_fill_color(ctx, GColorWhite);
       graphics_fill_rect(ctx, layer_get_bounds(layer), 0, GCornerNone);
-
-      // 顶部彩色条纹装饰（3px 高）
-      for (int i = 0; i < WAVE_LAYERS && i < 6; i++) {
-        int bar_w = s_width / WAVE_LAYERS;
-        graphics_context_set_fill_color(ctx, s_wave_colors[i]);
-        graphics_fill_rect(ctx, GRect(i * bar_w, 0, bar_w + 1, 3), 0, GCornerNone);
-      }
+      draw_color_bar(ctx);
 
       const char *title = (s_active_chat_index >= 0 && s_active_chat_index < s_chat_count) ? s_chat_entries[s_active_chat_index].title : "New chat";
       GSize title_size = graphics_text_layout_get_content_size(title, fonts_get_system_font(FONT_KEY_GOTHIC_14), GRect(0, 0, s_width, 20), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
@@ -614,14 +599,9 @@ static void anim_tick(void *data) {
     if (s_logo_morph > 0) s_logo_morph--;
   }
 
-  // thinking: 轻微旋转弧线 + 波浪微动
+  // thinking: 旋转弧线
   if (s_state == STATE_THINKING) {
     s_arc_angle = (s_arc_angle + 3) % 360;
-    // 波浪微动：±3px 正弦
-    int w = s_pulse_phase % 30;
-    s_wave_shift = (w <= 15) ? (w * 3 / 15) : (3 - (w - 15) * 3 / 15);
-  } else {
-    s_wave_shift = 0;
   }
 
   if (s_state == STATE_SHRINKING) {
@@ -727,7 +707,6 @@ static void set_state(AppState new_state) {
     case STATE_IDLE_NO_KEY:
     case STATE_IDLE_READY:
       s_logo_morph = 0;       // 重置为完整 Wi logo
-      s_wave_shift = 0;
       start_anim();
       break;
     case STATE_RECORDING:
@@ -1079,23 +1058,11 @@ static void window_load(Window *window) {
   // 收缩动画时的圆心 X：圆形屏居中更协调，方形屏居左
   s_circle_target_x = PBL_IF_ROUND_ELSE(s_width / 2, 24);
 
-  // 随机初始化冰淇淋层叠背景
+  // 随机初始化背景色 + 色彩条纹
   srand(time(NULL));
-  {
-    int layer_h = s_height / WAVE_LAYERS;
-    int step_w = (s_width + WAVE_PTS - 2) / (WAVE_PTS - 1);
-    for (int i = 0; i < WAVE_LAYERS; i++) {
-      s_wave_colors[i] = s_palette[rand() % PALETTE_SIZE];
-      int base_y = i * layer_h;
-      int amp = 4 + (rand() % 6);   // 振幅 4~9
-      int phase = rand() % 360;
-      for (int p = 0; p < WAVE_PTS; p++) {
-        int x = p * step_w;
-        int32_t angle = ((x * 3 + phase) % 360) * TRIG_MAX_ANGLE / 360;
-        int dy = (sin_lookup(angle) * amp) / TRIG_MAX_RATIO;
-        s_wave_edge[i][p] = base_y + dy;
-      }
-    }
+  s_bg_color = s_palette[rand() % PALETTE_SIZE];
+  for (int i = 0; i < WAVE_LAYERS; i++) {
+    s_wave_colors[i] = s_palette[rand() % PALETTE_SIZE];
   }
 
   // Canvas 层
@@ -1338,13 +1305,19 @@ static void menu_select_click(MenuLayer *menu, MenuIndex *idx, void *ctx) {
   app_timer_register(100, delayed_pop_timer, NULL);
 }
 
+// 菜单顶部色彩条纹绘制回调
+static void menu_bar_draw(Layer *layer, GContext *ctx) {
+  draw_color_bar(ctx);
+}
+
 static void list_window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   GRect bounds = layer_get_bounds(root);
 
   window_set_background_color(window, C_BG);
 
-  s_menu_layer = menu_layer_create(bounds);
+  // 菜单从 3px 下方开始，给色彩条纹留空间
+  s_menu_layer = menu_layer_create(GRect(0, 3, bounds.size.w, bounds.size.h - 3));
   menu_layer_set_callbacks(s_menu_layer, s_menu_layer, (MenuLayerCallbacks){
     .get_num_rows = menu_get_num_rows,
     .get_cell_height = menu_get_cell_height,
@@ -1355,6 +1328,11 @@ static void list_window_load(Window *window) {
   menu_layer_set_highlight_colors(s_menu_layer, GColorCobaltBlue, GColorWhite);
   menu_layer_set_click_config_onto_window(s_menu_layer, window);
   layer_add_child(root, menu_layer_get_layer(s_menu_layer));
+
+  // 顶部色彩条纹（叠加在菜单上方）
+  Layer *bar = layer_create(GRect(0, 0, bounds.size.w, 3));
+  layer_set_update_proc(bar, menu_bar_draw);
+  layer_add_child(root, bar);
 }
 
 static void list_window_unload(Window *window) {
