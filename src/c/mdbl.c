@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// Pebble On Wrist AI — 手表端 C 代码
+// Wrist AI — 手表端 C 代码
 //
 // 架构概览：
 //   单文件实现，包含主界面、对话列表菜单、模型选择菜单、
@@ -23,7 +23,7 @@
 // ── 状态机 ───────────────────────────────────────────────────────────────────
 typedef enum {
   STATE_IDLE_NO_KEY,   // 未配置 API Key，圆圈灰色，提示用户去设置
-  STATE_IDLE_READY,    // 已就绪，显示蓝色大圆 + 当前对话标题
+  STATE_IDLE_READY,    // 已就绪，显示 Wi logo + 当前对话标题
   STATE_RECORDING,     // 语音输入中（3点跳动动画）
   STATE_SENDING,       // 正在发送问题到手机（箭头动画）
   STATE_THINKING,      // 等待 AI 回复（呼吸圆 + 旋转小点）
@@ -35,10 +35,7 @@ typedef enum {
 static AppState s_state = STATE_IDLE_NO_KEY;
 
 // ── 配色方案 ──────────────────────────────────────────────────────────────────
-// 多彩滩涂背景 + 白色 logo，放弃蓝色圆设计
-#define C_TEXT_DARK   GColorWhite       // logo / 圆上文字
 #define C_TEXT_LIGHT  GColorBlack       // 白底上的文字
-#define C_SUBTITLE    GColorWhite       // 副标题（白色，在彩色背景上）
 #define C_ACCENT      GColorBlue        // 强调色（菜单蓝字）
 #define C_SHADOW      GColorDarkGray    // logo 阴影色
 
@@ -50,10 +47,8 @@ static AppState s_state = STATE_IDLE_NO_KEY;
 // ── 背景 ─────────────────────────────────────────────────────────────────────
 // 每次启动随机纯色底 + 5 层色彩条纹（回复页/菜单页顶部装饰用）
 #define WAVE_LAYERS 5
-static GColor s_wave_colors[WAVE_LAYERS]; // 5 层色彩条纹
-static GColor s_bg_color;                 // 主屏随机纯色底
-
-// 彩虹脉冲 — 已简化为纯色底，保留变量兼容
+static GColor s_wave_colors[WAVE_LAYERS];
+static GColor s_bg_color;
 
 // 调色板：暖色滩涂系（Pebble 64 色中挑选的柔和色）
 static const GColor s_palette[] = {
@@ -75,7 +70,6 @@ static const GColor s_palette[] = {
 // ── 布局常量 ─────────────────────────────────────────────────────────────────
 #define CIRCLE_R_SMALL  14
 #define CIRCLE_Y_SMALL  PBL_IF_ROUND_ELSE(28, 20)
-#define SCROLL_OFFSET   40
 
 // 动态布局（从屏幕尺寸计算）
 static int s_circle_r_big;
@@ -634,8 +628,14 @@ static void anim_tick(void *data) {
       s_circle_r = s_circle_r_big;
       s_circle_y = s_circle_y_big;
       s_circle_x = s_width / 2;
+      // C3+C8 fix: 防止重复创建 dictation session，并正确切换到 RECORDING 状态
+      if (s_dictation_session) {
+        set_state(STATE_IDLE_READY);
+        return;
+      }
       s_dictation_session = dictation_session_create(DICTATION_BUF_SIZE, dictation_callback, NULL);
       if (s_dictation_session) {
+        set_state(STATE_RECORDING);
         dictation_session_start(s_dictation_session);
       } else {
         set_state(STATE_IDLE_READY);
@@ -857,6 +857,17 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     }
   }
 
+  // 用户问题（切换对话时由 JS 发来的历史问题）
+  Tuple *user_q_t = dict_find(iter, MESSAGE_KEY_USER_QUESTION);
+  if (user_q_t) {
+    snprintf(s_question_display, sizeof(s_question_display), "You: %s", user_q_t->value->cstring);
+    // 为新内容做准备：清空回复缓冲区，如果已在 RESPONSE 则重置布局
+    s_reply_buf[0] = '\0';
+    if (s_state == STATE_RESPONSE) {
+      set_state(STATE_RESPONSE);
+    }
+  }
+
   Tuple *reply_t = dict_find(iter, MESSAGE_KEY_REPLY);
   Tuple *reply_chunk_t = dict_find(iter, MESSAGE_KEY_REPLY_CHUNK);
   Tuple *reply_end_t = dict_find(iter, MESSAGE_KEY_REPLY_END);
@@ -865,6 +876,10 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     if (s_state == STATE_SENDING || s_state == STATE_THINKING) {
       s_reply_buf[0] = '\0';
       set_state(STATE_SHRINKING);
+    } else if (s_state == STATE_IDLE_READY) {
+      // 历史加载：跳过动画直接进入回复页面
+      s_reply_buf[0] = '\0';
+      set_state(STATE_RESPONSE);
     }
     strncat(s_reply_buf, reply_chunk_t->value->cstring, sizeof(s_reply_buf) - strlen(s_reply_buf) - 1);
     if (s_state == STATE_RESPONSE) {
@@ -886,10 +901,15 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
 
   Tuple *status_t = dict_find(iter, MESSAGE_KEY_STATUS);
   if (status_t && !reply_t && !reply_chunk_t) {
-    if (strlen(s_reply_buf) > 0) {
-      strncat(s_reply_buf, "\n\n[Err]: ", sizeof(s_reply_buf) - strlen(s_reply_buf) - 1);
-      strncat(s_reply_buf, status_t->value->cstring, sizeof(s_reply_buf) - strlen(s_reply_buf) - 1);
-    } else {
+    // C2 fix: 追加错误信息前检查剩余空间，防止逼近缓冲区上限
+    size_t remaining = sizeof(s_reply_buf) - strlen(s_reply_buf) - 1;
+    if (strlen(s_reply_buf) > 0 && remaining > 12) {
+      strncat(s_reply_buf, "\n[Err]: ", remaining);
+      remaining = sizeof(s_reply_buf) - strlen(s_reply_buf) - 1;
+      if (remaining > 0) {
+        strncat(s_reply_buf, status_t->value->cstring, remaining);
+      }
+    } else if (strlen(s_reply_buf) == 0) {
       snprintf(s_reply_buf, sizeof(s_reply_buf), "%s", status_t->value->cstring);
     }
     
@@ -932,9 +952,11 @@ static void outbox_failed(DictionaryIterator *iter, AppMessageResult reason, voi
 // ═══════════════════════════════════════════════════════════════════════════════
 static void select_handler(ClickRecognizerRef r, void *ctx) {
   if (s_state == STATE_IDLE_READY) {
-    // 短按：开始语音输入
+    // C7+C8 fix: 防重复创建 + 立即切到 RECORDING 状态
+    if (s_dictation_session) return;
     s_dictation_session = dictation_session_create(DICTATION_BUF_SIZE, dictation_callback, NULL);
     if (s_dictation_session) {
+      set_state(STATE_RECORDING);
       dictation_session_start(s_dictation_session);
     }
   } else if (s_state == STATE_RESPONSE) {
@@ -989,6 +1011,7 @@ static void select_long_handler(ClickRecognizerRef r, void *ctx) {
 // UP 短按：在回复状态向上滚动；其他状态打开菜单
 static void up_handler(ClickRecognizerRef r, void *ctx) {
   if (s_state == STATE_RESPONSE) {
+    s_user_scrolled = true;  // C10 fix: 用户手动滚动后停止自动跳底
     GPoint offset = scroll_layer_get_content_offset(s_scroll_layer);
     offset.y += 60;
     if (offset.y > 0) offset.y = 0;
@@ -1006,6 +1029,7 @@ static void up_long_handler(ClickRecognizerRef r, void *ctx) {
 // DOWN 短按：回复页面向下滚动 60px，其他状态打开菜单
 static void down_handler(ClickRecognizerRef r, void *ctx) {
   if (s_state == STATE_RESPONSE) {
+    s_user_scrolled = true;  // C10 fix: 用户手动滚动后停止自动跳底
     GPoint offset = scroll_layer_get_content_offset(s_scroll_layer);
     offset.y -= 60;
     scroll_layer_set_content_offset(s_scroll_layer, offset, true);
@@ -1078,8 +1102,10 @@ static void window_load(Window *window) {
   // 随机初始化背景色 + 色彩条纹
   srand(time(NULL));
   s_bg_color = s_palette[rand() % PALETTE_SIZE];
+  // 色彩条纹：从随机起点取相邻色，确保配色和谐（步长 2 增加色域跨度）
+  int stripe_base = rand() % PALETTE_SIZE;
   for (int i = 0; i < WAVE_LAYERS; i++) {
-    s_wave_colors[i] = s_palette[rand() % PALETTE_SIZE];
+    s_wave_colors[i] = s_palette[(stripe_base + i * 2) % PALETTE_SIZE];
   }
 
   // Canvas 层
@@ -1101,7 +1127,8 @@ static void window_load(Window *window) {
 
   // 问题显示层 (滚动区顶部)
   s_question_display_layer = text_layer_create(GRect(10, 0, s_width - 20, 44));
-  text_layer_set_text_color(s_question_display_layer, C_SUBTITLE);
+  // C13 fix: 初始颜色用 GColorDarkGray 而非白色，避免白字白底不可见
+  text_layer_set_text_color(s_question_display_layer, GColorDarkGray);
   text_layer_set_background_color(s_question_display_layer, GColorWhite);
   text_layer_set_font(s_question_display_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
   text_layer_set_text_alignment(s_question_display_layer, PBL_IF_ROUND_ELSE(GTextAlignmentCenter, GTextAlignmentLeft));
@@ -1239,7 +1266,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *idx
 
   graphics_context_set_text_color(ctx, highlighted ? GColorWhite : GColorBlack);
   graphics_draw_text(ctx, title, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), title_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-  graphics_context_set_text_color(ctx, highlighted ? GColorCeleste : (active ? C_ACCENT : C_SUBTITLE));
+  graphics_context_set_text_color(ctx, highlighted ? GColorCeleste : (active ? C_ACCENT : GColorDarkGray));
   graphics_draw_text(ctx, sub, fonts_get_system_font(FONT_KEY_GOTHIC_14), sub_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
 
@@ -1261,7 +1288,6 @@ static void menu_select_click(MenuLayer *menu, MenuIndex *idx, void *ctx) {
   if (idx->row == 1) {
     // 点击新建对话
     s_active_chat_index = -1;
-    s_circle_target_x = s_width / 2; // 无标题时居中
     DictionaryIterator *iter;
     if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
       dict_write_cstring(iter, MESSAGE_KEY_SWITCH_CHAT, "");
@@ -1294,23 +1320,11 @@ static void menu_select_click(MenuLayer *menu, MenuIndex *idx, void *ctx) {
     return;
   }
 
-  // 预先计算目标位置以消除动画抖动
-  const char *target_title = s_chat_entries[chat_idx].title;
-  GSize ts = graphics_text_layout_get_content_size(target_title, fonts_get_system_font(FONT_KEY_GOTHIC_14), GRect(0, 0, s_width, 20), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
-  s_circle_target_x = (s_width - (28 + 5 + ts.w)) / 2 + 14;
-
   DictionaryIterator *iter;
   if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
     dict_write_cstring(iter, MESSAGE_KEY_SWITCH_CHAT, s_chat_entries[chat_idx].id);
     app_message_outbox_send();
   }
-
-  // 动态更新收缩动画的目标 X：使其与 canvas_draw 中动态计算的水平居中位置一致
-  // Header total width = circle(28) + padding(5) + text_width
-  const char *title = (s_active_chat_index >= 0 && s_active_chat_index < s_chat_count) ? s_chat_entries[s_active_chat_index].title : "New chat";
-  GSize title_size = graphics_text_layout_get_content_size(title, fonts_get_system_font(FONT_KEY_GOTHIC_14), GRect(0, 0, s_width, 20), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
-  int header_w = 28 + 5 + title_size.w;
-  s_circle_target_x = (s_width - header_w) / 2 + 14;
 
   s_reply_buf[0] = '\0';
   s_question_display[0] = '\0';
@@ -1557,7 +1571,7 @@ static void parse_model_list(const char *data) {
 // App 生命周期
 // ═══════════════════════════════════════════════════════════════════════════════
 static void init(void) {
-  srand(time(NULL));  // 初始化随机数种子（用于彩蛋问题随机选择）
+  // C12 fix: srand 已在 window_load 中调用，此处移除重复调用
 
   // 注册 AppMessage 回调
   app_message_register_inbox_received(inbox_received);
@@ -1585,8 +1599,16 @@ static void deinit(void) {
   if (s_thinking_timeout) app_timer_cancel(s_thinking_timeout);
   if (s_dictation_session) dictation_session_destroy(s_dictation_session);
 
-  if (s_model_window) window_destroy(s_model_window);
-  if (s_list_window) window_destroy(s_list_window);
+  // C4 fix: 先从 window stack 移除再销毁，防止 stack 上悬空指针导致崩溃
+  if (s_model_window) {
+    window_stack_remove(s_model_window, false);
+    window_destroy(s_model_window);
+  }
+  if (s_list_window) {
+    window_stack_remove(s_list_window, false);
+    window_destroy(s_list_window);
+  }
+  window_stack_remove(s_window, false);
   window_destroy(s_window);
 }
 

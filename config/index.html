@@ -32,6 +32,17 @@
     }
     .model-add-btn:active { background: #0066ff; }
     .model-list { list-style: none; }
+
+    /* API 模式切换 */
+    .mode-toggle { display: flex; gap: 0; margin-bottom: 10px; border-radius: 6px; overflow: hidden; }
+    .mode-btn {
+      flex: 1; padding: 10px; border: 1px solid #223; background: #111; color: #888;
+      font-size: 13px; text-align: center; cursor: pointer; transition: all 0.15s;
+    }
+    .mode-btn.active { background: #0047AB; color: #fff; border-color: #0047AB; }
+    .mode-btn:first-child { border-radius: 6px 0 0 6px; }
+    .mode-btn:last-child { border-radius: 0 6px 6px 0; }
+    .custom-url-field { display: none; margin-top: 8px; }
     .model-item {
       display: flex; align-items: center; padding: 10px;
       background: #111; border-radius: 6px; margin-bottom: 6px;
@@ -75,7 +86,19 @@
 
   <!-- API 设置 -->
   <div class="field">
-    <label>OpenRouter API Key</label>
+    <label>API Provider</label>
+    <div class="mode-toggle">
+      <div class="mode-btn active" id="mode_openrouter" data-mode="openrouter">OpenRouter</div>
+      <div class="mode-btn" id="mode_custom" data-mode="custom">Custom API</div>
+    </div>
+    <div class="custom-url-field" id="custom_url_wrap">
+      <input type="url" id="custom_api_url" placeholder="https://api.example.com/v1/chat/completions">
+      <div class="hint">OpenAI-compatible endpoint (must accept /v1/chat/completions format)</div>
+    </div>
+  </div>
+
+  <div class="field">
+    <label>API Key</label>
     <input type="password" id="api_key" placeholder="sk-or-v1-xxxx...">
     <div class="status" id="key_status"></div>
   </div>
@@ -148,13 +171,42 @@
       modelList = [currentModel];
     }
 
+    // API 模式
+    var apiMode = getParam('api_mode') || 'openrouter';
+    var customApiUrl = getParam('custom_api_url') || '';
+
+    function applyApiMode(mode) {
+      apiMode = mode;
+      var btnOR = document.getElementById('mode_openrouter');
+      var btnCU = document.getElementById('mode_custom');
+      var urlWrap = document.getElementById('custom_url_wrap');
+      var keyInput = document.getElementById('api_key');
+      if (mode === 'custom') {
+        btnOR.className = 'mode-btn';
+        btnCU.className = 'mode-btn active';
+        urlWrap.style.display = 'block';
+        keyInput.placeholder = hasKey ? 'Leave blank to keep current' : 'Enter your API key';
+      } else {
+        btnOR.className = 'mode-btn active';
+        btnCU.className = 'mode-btn';
+        urlWrap.style.display = 'none';
+        keyInput.placeholder = hasKey ? 'Leave blank to keep current' : 'sk-or-v1-xxxx...';
+      }
+    }
+
+    document.getElementById('mode_openrouter').addEventListener('click', function() { applyApiMode('openrouter'); });
+    document.getElementById('mode_custom').addEventListener('click', function() { applyApiMode('custom'); });
+
+    // 初始化模式
+    if (customApiUrl) document.getElementById('custom_api_url').value = customApiUrl;
+    applyApiMode(apiMode);
+
     // 填充设置
     document.getElementById('key_status').textContent =
       hasKey ? 'Key is set. Leave blank to keep.' : 'No key configured.';
     document.getElementById('api_key').placeholder =
       hasKey ? 'Leave blank to keep current' : 'sk-or-v1-xxxx...';
-    document.getElementById('system_message').value = getParam('system_message') ||
-      "You are Pebble Wrist AI, a daily Q&A assistant. Your client runs on a Pebble smartwatch. Your answers must be concise: think in no more than two lines, reply only with essential information, do not elaborate, no filler.";
+    document.getElementById('system_message').value = getParam('system_message');
 
     // ── 模型列表 UI ──────────────────────────────────────────────────
     var modelListEl = document.getElementById('model_list_el');
@@ -223,10 +275,13 @@
 
     // ── 对话列表 ──────────────────────────────────────────────────────
     var listEl = document.getElementById('chat_list');
-    if (chats.length === 0) {
-      listEl.innerHTML = '<li class="empty">No conversations yet</li>';
-    } else {
-      // 倒序显示（最新在前）
+    var pendingDeletes = [];
+
+    function renderChatList() {
+      if (chats.length === 0) {
+        listEl.innerHTML = '<li class="empty">No conversations yet</li>';
+        return;
+      }
       chats.sort(function(a, b) { return b.created - a.created; });
       var html = '';
       for (var i = 0; i < chats.length; i++) {
@@ -239,7 +294,7 @@
         html += '<li class="chat-item' + (isActive ? ' active' : '') + '">'
           + '<div class="chat-info">'
           + '<div class="chat-title">' + (c.title || 'Untitled').replace(/</g, '&lt;') + '</div>'
-          + '<div class="chat-meta">' + dateStr + ' · ' + msgCount + ' msgs' + (isActive ? ' · Active' : '') + (!hasDetails ? ' · ⚠️ 无法导出全量' : '') + '</div>'
+          + '<div class="chat-meta">' + dateStr + ' · ' + msgCount + ' msgs' + (isActive ? ' · Active' : '') + (!hasDetails ? ' · No export data' : '') + '</div>'
           + '</div>'
           + '<div class="chat-actions">'
           + (isActive ? '' : '<button class="chat-btn chat-btn-switch" data-id="' + c.id + '">Switch</button>')
@@ -250,15 +305,22 @@
       listEl.innerHTML = html;
     }
 
-    // 构造返回设置
+    renderChatList();
+
+    // 构造返回设置（含所有待处理操作）
     function buildSettings(extra) {
       var s = {
         model: currentModel,
         model_list: modelList,
-        system_message: document.getElementById('system_message').value.trim()
+        system_message: document.getElementById('system_message').value.trim(),
+        api_mode: apiMode,
+        custom_api_url: document.getElementById('custom_api_url').value.trim()
       };
       var key = document.getElementById('api_key').value.trim();
       if (key.length > 0) s.api_key = key;
+      // 附带页内累积的切换/删除操作
+      if (activeId !== getParam('active_id')) s.switch_to = activeId;
+      if (pendingDeletes.length > 0) s.deleted_chats = pendingDeletes;
       if (extra) {
         for (var k in extra) s[k] = extra[k];
       }
@@ -289,13 +351,22 @@
     });
 
     // 切换/删除/导出对话（事件委托）
+    // Switch 和 Delete 仅更新页内 UI，所有变更在点击 Save 时统一提交
     listEl.addEventListener('click', function(e) {
       var btn = e.target;
       if (btn.classList.contains('chat-btn-switch')) {
-        closeWith(buildSettings({ switch_to: btn.dataset.id }));
+        activeId = btn.dataset.id;
+        renderChatList();
       } else if (btn.classList.contains('chat-btn-delete')) {
         if (confirm('Delete this conversation?')) {
-          closeWith(buildSettings({ delete_chat: btn.dataset.id }));
+          var cid = btn.dataset.id;
+          pendingDeletes.push(cid);
+          chats = chats.filter(function(c) { return c.id !== cid; });
+          delete safeMessagesMap[cid];
+          if (activeId === cid) {
+            activeId = chats.length > 0 ? chats[0].id : null;
+          }
+          renderChatList();
         }
       } else if (btn.classList.contains('chat-btn-export')) {
         // 触发导出包含完整上下问信息的 JSON 备份（单条对话极简导出设计，不提供合并导出，防止不可控文件体积）

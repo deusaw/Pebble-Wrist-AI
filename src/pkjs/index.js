@@ -134,6 +134,19 @@ function getSetting(key, defaultVal) {
   return localStorage.getItem(key) || defaultVal;
 }
 
+// API 模式：'openrouter'（默认）或 'custom'
+function getApiEndpoint() {
+  var mode = getSetting('api_mode', 'openrouter');
+  if (mode === 'custom') {
+    return getSetting('custom_api_url', '');
+  }
+  return 'https://openrouter.ai/api/v1/chat/completions';
+}
+
+function isOpenRouter() {
+  return getSetting('api_mode', 'openrouter') === 'openrouter';
+}
+
 // 全局自增会话ID：每次新请求 +1，旧请求的回调通过比对此值判断是否已过期
 var currentAskSessionId = 0;
 
@@ -229,12 +242,17 @@ function generateTitle(chatId, userMsg, aiReply) {
   var model = getSetting('model', 'google/gemma-4-31b-it');
   if (!apiKey) return;
 
+  var endpoint = getApiEndpoint();
+  if (!endpoint) return;
+
   var xhr = new XMLHttpRequest();
-  xhr.open('POST', 'https://openrouter.ai/api/v1/chat/completions', true);
+  xhr.open('POST', endpoint, true);
   xhr.setRequestHeader('Content-Type', 'application/json');
   xhr.setRequestHeader('Authorization', 'Bearer ' + apiKey);
-  xhr.setRequestHeader('HTTP-Referer', 'https://github.com/deusaw/Pebble-Wrist-AI');
-  xhr.setRequestHeader('X-Title', 'Pebble Wrist AI');
+  if (isOpenRouter()) {
+    xhr.setRequestHeader('HTTP-Referer', 'https://github.com/deusaw/Pebble-Wrist-AI');
+    xhr.setRequestHeader('X-Title', 'Pebble Wrist AI');
+  }
   xhr.timeout = 30000;
 
   xhr.onload = function() {
@@ -313,7 +331,8 @@ function generateTitle(chatId, userMsg, aiReply) {
 //   - 非流式一次性返回完整 JSON，稳定可靠
 //   - 超时 80秒（大模型思考可能较慢）
 // ═══════════════════════════════════════════════════════════════════════════════
-function askAI(question, onChunk, onFinish) {
+// JS3 fix: 移除未使用的 onChunk 参数，非流式模式不需要分块回调
+function askAI(question, onFinish) {
   currentAskSessionId++;
   var thisSessionId = currentAskSessionId;
 
@@ -326,6 +345,12 @@ function askAI(question, onChunk, onFinish) {
     return;
   }
 
+  var endpoint = getApiEndpoint();
+  if (!endpoint) {
+    onFinish('No API URL. Open settings.', '');
+    return;
+  }
+
   var store = loadStore();
   var chat = getActiveChat(store);
   if (!chat) {
@@ -335,11 +360,13 @@ function askAI(question, onChunk, onFinish) {
   var sendMessages = chat.messages.concat([{ role: 'user', content: question }]);
 
   var xhr = new XMLHttpRequest();
-  xhr.open('POST', 'https://openrouter.ai/api/v1/chat/completions', true);
+  xhr.open('POST', endpoint, true);
   xhr.setRequestHeader('Content-Type', 'application/json');
   xhr.setRequestHeader('Authorization', 'Bearer ' + apiKey);
-  xhr.setRequestHeader('HTTP-Referer', 'https://github.com/deusaw/Pebble-Wrist-AI');
-  xhr.setRequestHeader('X-Title', 'Pebble Wrist AI');
+  if (isOpenRouter()) {
+    xhr.setRequestHeader('HTTP-Referer', 'https://github.com/deusaw/Pebble-Wrist-AI');
+    xhr.setRequestHeader('X-Title', 'Pebble Wrist AI');
+  }
 
   xhr.onload = function() {
     if (thisSessionId !== currentAskSessionId) return;
@@ -360,7 +387,23 @@ function askAI(question, onChunk, onFinish) {
     try {
       var data = JSON.parse(xhr.responseText);
       if (data.choices && data.choices.length > 0 && data.choices[0].message) {
-        accumulatedReply = data.choices[0].message.content || data.choices[0].message.reasoning || '';
+        var msg = data.choices[0].message;
+        // JS1 fix: 正确处理 thinking model 返回的 content 数组
+        // 如 Claude: [{type:"thinking",...}, {type:"text", text:"..."}]
+        if (typeof msg.content === 'string') {
+          accumulatedReply = msg.content;
+        } else if (Array.isArray(msg.content)) {
+          for (var ci = 0; ci < msg.content.length; ci++) {
+            if (msg.content[ci].type === 'text' && msg.content[ci].text) {
+              accumulatedReply = msg.content[ci].text;
+              break;
+            }
+          }
+        }
+        // Fallback: reasoning 字段（某些 thinking model）
+        if (!accumulatedReply && msg.reasoning) {
+          accumulatedReply = msg.reasoning;
+        }
       }
     } catch (e) {
       console.log('[Parse] JSON error: ' + e);
@@ -449,6 +492,36 @@ Pebble.addEventListener('appmessage', function(e) {
       }
     }
     setTimeout(sendChatList, 100);
+
+    // 加载切换到的对话的最后一条 Q&A，让手表直接显示历史回复
+    var switchedChat = getActiveChat(store2);
+    if (switchedChat && switchedChat.messages && switchedChat.messages.length >= 2) {
+      var lastQ = '', lastA = '';
+      for (var k = switchedChat.messages.length - 1; k >= 0; k--) {
+        if (!lastA && switchedChat.messages[k].role === 'assistant') {
+          lastA = switchedChat.messages[k].content;
+        }
+        if (!lastQ && switchedChat.messages[k].role === 'user') {
+          lastQ = switchedChat.messages[k].content;
+        }
+        if (lastQ && lastA) break;
+      }
+      if (lastA) {
+        setTimeout(function() {
+          var MAX_WATCH_CHARS = 1800;
+          if (lastQ) {
+            sendToWatch({ 'USER_QUESTION': lastQ.substring(0, 120) });
+          }
+          var text = lastA.substring(0, MAX_WATCH_CHARS);
+          var chunkSize = 256;
+          for (var ci = 0; ci < text.length; ci += chunkSize) {
+            sendToWatch({ 'REPLY_CHUNK': text.substring(ci, ci + chunkSize) });
+          }
+          sendToWatch({ 'REPLY_END': 1 });
+        }, 300);
+      }
+    }
+
     return;
   }
 
@@ -457,69 +530,26 @@ Pebble.addEventListener('appmessage', function(e) {
 
   console.log('Q: ' + question.substring(0, 60));
 
-  var messageBuffer = '';
-  var sendTimeout = null;
-  var totalChunksSentLength = 0;
+  var MAX_WATCH_CHARS = 1800;  // 手表端单条回复的展示上限（C 端 R_BUF_SIZE=2048，留余量防溢出）
 
-  function flushChunk() {
-    if (messageBuffer.length > 0) {
-      // Pebble AppMessage maximum payload payload size could be limited.
-      // Split into 256 char chunks to ensure reliable bluetooth transmission.
-      var chunkSize = 256;
-      for (var i = 0; i < messageBuffer.length; i += chunkSize) {
-        var chunk = messageBuffer.substring(i, i + chunkSize);
-        sendToWatch({ 'REPLY_CHUNK': chunk });
-        totalChunksSentLength += chunk.length;
-      }
-      messageBuffer = '';
-    }
-    sendTimeout = null;
-  }
-
-  var MAX_WATCH_CHARS = 1800;  // 手表端单条回复的展示上限（由于 C 端内存只有 2048 字节缓存空间，留足余量防溢出崩溃）
-  var truncated = false;
-
-  askAI(question, function onChunk(text) {
-    if (truncated) return;  // 已触达上限，忽略后续 chunk
-
-    // 检查是否超出上限
-    if (totalChunksSentLength + messageBuffer.length + text.length > MAX_WATCH_CHARS) {
-      // 把当前 buffer + 截断提示一并 flush
-      var remaining = MAX_WATCH_CHARS - totalChunksSentLength - messageBuffer.length;
-      if (remaining > 0) {
-        messageBuffer += text.substring(0, remaining);
-      }
-      messageBuffer += '\n[...truncated]';
-      truncated = true;
-      if (sendTimeout) { clearTimeout(sendTimeout); sendTimeout = null; }
-      flushChunk();
-      return;
-    }
-
-    messageBuffer += text;
-    if (!sendTimeout) {
-      sendTimeout = setTimeout(flushChunk, 250); // debounce AppMessage interval 250ms
-    }
-  }, function onFinish(err, reply) {
-    if (truncated) {
-      sendToWatch({ 'REPLY_END': 1 });
-      return;
-    }
-    if (sendTimeout) {
-      clearTimeout(sendTimeout);
-      sendTimeout = null;
-      flushChunk();
-    }
+  // JS3 fix: 移除 onChunk 死代码，非流式模式下直接在 onFinish 中处理完整回复
+  askAI(question, function onFinish(err, reply) {
     if (err) {
       console.log('Error: ' + err);
       sendToWatch({ 'STATUS': 'Error: ' + err.substring(0, 40) });
-      sendToWatch({ 'REPLY_END': 1 }); // 确保手表退出 THINKING 状态，不会永久卡死
+      sendToWatch({ 'REPLY_END': 1 });
       return;
     }
-    // 如果流式没有输出任何成功内容（被非流式返回），则兜底重新发送整个回复。
-    if (reply && reply.length > 0 && totalChunksSentLength === 0) {
-       messageBuffer += reply.substring(0, MAX_WATCH_CHARS);
-       flushChunk();
+    if (reply && reply.length > 0) {
+      // 截断过长回复 + 分块发送（蓝牙 256 字节限制）
+      var text = reply.substring(0, MAX_WATCH_CHARS);
+      if (reply.length > MAX_WATCH_CHARS) {
+        text += '\n[...truncated]';
+      }
+      var chunkSize = 256;
+      for (var i = 0; i < text.length; i += chunkSize) {
+        sendToWatch({ 'REPLY_CHUNK': text.substring(i, i + chunkSize) });
+      }
     }
     sendToWatch({ 'REPLY_END': 1 });
   });
@@ -553,14 +583,18 @@ Pebble.addEventListener('showConfiguration', function() {
   }
 
   var modelList = getModelList();
+  var apiMode = getSetting('api_mode', 'openrouter');
+  var customApiUrl = getSetting('custom_api_url', '');
 
   var url = 'https://deusaw.github.io/Pebble-Wrist-AI/config/'
     + '?has_key=' + hasKey
     + '&model=' + encodeURIComponent(model)
     + '&model_list=' + encodeURIComponent(JSON.stringify(modelList))
-    + '&system_message=' + encodeURIComponent(systemMessage.substring(0, 300))
+    + '&system_message=' + encodeURIComponent(systemMessage)
     + '&active_id=' + encodeURIComponent(store.active_id || '')
     + '&chats=' + encodeURIComponent(JSON.stringify(chatMeta))
+    + '&api_mode=' + encodeURIComponent(apiMode)
+    + '&custom_api_url=' + encodeURIComponent(customApiUrl)
     + '#export_data=' + encodeURIComponent(JSON.stringify(safeDocs));
 
   Pebble.openURL(url);
@@ -579,6 +613,13 @@ Pebble.addEventListener('webviewclosed', function(e) {
       localStorage.removeItem('api_key');
     } else if (settings.api_key && settings.api_key.trim().length > 0) {
       localStorage.setItem('api_key', settings.api_key.trim());
+    }
+
+    if (settings.api_mode) {
+      localStorage.setItem('api_mode', settings.api_mode);
+    }
+    if (settings.api_mode === 'custom' && typeof settings.custom_api_url === 'string') {
+      localStorage.setItem('custom_api_url', settings.custom_api_url.trim());
     }
 
     if (settings.model && settings.model.trim().length > 0) {
@@ -611,6 +652,24 @@ Pebble.addEventListener('webviewclosed', function(e) {
     if (settings.delete_chat) {
       var store2 = loadStore();
       deleteChat(store2, settings.delete_chat);
+    }
+
+    // 批量删除（config 页面积累的多条删除操作）
+    if (settings.deleted_chats && Array.isArray(settings.deleted_chats)) {
+      var storeD = loadStore();
+      for (var di = 0; di < settings.deleted_chats.length; di++) {
+        storeD.chats = storeD.chats.filter(function(c) { return c.id !== settings.deleted_chats[di]; });
+      }
+      if (storeD.active_id) {
+        var stillExists = false;
+        for (var si = 0; si < storeD.chats.length; si++) {
+          if (storeD.chats[si].id === storeD.active_id) { stillExists = true; break; }
+        }
+        if (!stillExists) {
+          storeD.active_id = storeD.chats.length > 0 ? storeD.chats[storeD.chats.length - 1].id : null;
+        }
+      }
+      saveStore(storeD);
     }
 
     if (settings.clear_all) {
