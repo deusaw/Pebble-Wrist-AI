@@ -590,14 +590,12 @@ static void anim_tick(void *data) {
   s_anim_frame++;
   s_pulse_phase++;
 
-  // 心跳动效（idle 状态，±2px 正弦脉冲）
+  // 心跳动效（idle 状态，±2px 正弦平滑脉冲）
   if (s_state == STATE_IDLE_NO_KEY || s_state == STATE_IDLE_READY) {
-    int beat = s_pulse_phase % 20;
-    if (beat < 5) s_heartbeat = beat * 2 / 5;        // 0→2
-    else if (beat < 10) s_heartbeat = 2 - (beat-5)*2/5; // 2→0
-    else if (beat < 13) s_heartbeat = -(beat-10)*2/3;   // 0→-2
-    else if (beat < 16) s_heartbeat = -2 + (beat-13)*2/3; // -2→0
-    else s_heartbeat = 0;
+    // 周期 40 帧 × 100ms = 4 秒一个完整心跳
+    int phase_deg = (s_pulse_phase % 40) * 360 / 40;
+    int32_t angle = (phase_deg * TRIG_MAX_ANGLE) / 360;
+    s_heartbeat = (sin_lookup(angle) * 3) / TRIG_MAX_RATIO;  // ±3px 平滑
   } else {
     s_heartbeat = 0;
   }
@@ -654,9 +652,9 @@ static void anim_tick(void *data) {
   int interval = 50;  // 默认 20fps
   if (s_state == STATE_SHRINKING || s_state == STATE_EXPANDING) interval = 25;  // 40fps
   if (s_state == STATE_IDLE_NO_KEY || s_state == STATE_IDLE_READY) {
-    interval = 200;  // 5fps（心跳动效，省电）
-    // 30 秒后停止动画省电（150帧 × 200ms）
-    if (s_anim_frame > 150) {
+    interval = 100;  // 10fps（心跳平滑）
+    // 60 秒后停止动画省电（600帧 × 100ms）
+    if (s_anim_frame > 600) {
       s_heartbeat = 0;
       layer_mark_dirty(s_canvas_layer);  // 最后一帧重绘为静态
       s_anim_timer = NULL;
