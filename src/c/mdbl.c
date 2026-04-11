@@ -1,30 +1,51 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// Pebble On Wrist AI — 手表端 C 代码
+//
+// 架构概览：
+//   单文件实现，包含主界面、对话列表菜单、模型选择菜单、
+//   动画系统、AppMessage 通讯、状态机管理。
+//
+// 状态机流转：
+//   IDLE_NO_KEY → (收到 API Key) → IDLE_READY
+//   IDLE_READY  → (按 SELECT)    → 语音输入 → SENDING → THINKING → SHRINKING → RESPONSE
+//   RESPONSE    → (按 SELECT)    → EXPANDING → IDLE_READY (继续追问)
+//   任何状态    → (长按 SELECT) → 新建对话 → IDLE_READY
+//
+// 内存预算 (Basalt 24KB 可用 RAM)：
+//   s_reply_buf:    2048 字节
+//   s_chat_entries:  20 x 56 = 1120 字节
+//   s_model_names:   5 x 48 = 240 字节
+//   UI 元素 + 其他:  ~2KB
+//   总计: ~5.5KB，安全。
+// ═══════════════════════════════════════════════════════════════════════════════
 #include <pebble.h>
 
 // ── 状态机 ───────────────────────────────────────────────────────────────────
 typedef enum {
-  STATE_IDLE_NO_KEY,
-  STATE_IDLE_READY,
-  STATE_RECORDING,
-  STATE_SENDING,
-  STATE_THINKING,
-  STATE_SHRINKING,
-  STATE_EXPANDING,    // 从回复状态回到大圆（新提问）
-  STATE_RESPONSE
+  STATE_IDLE_NO_KEY,   // 未配置 API Key，圆圈灰色，提示用户去设置
+  STATE_IDLE_READY,    // 已就绪，显示蓝色大圆 + 当前对话标题
+  STATE_RECORDING,     // 语音输入中（3点跳动动画）
+  STATE_SENDING,       // 正在发送问题到手机（箭头动画）
+  STATE_THINKING,      // 等待 AI 回复（呼吸圆 + 旋转小点）
+  STATE_SHRINKING,     // 大圆缩小动画（过渡到回复显示）
+  STATE_EXPANDING,     // 小圆放大动画（从回复回到大圆继续追问）
+  STATE_RESPONSE       // 显示 AI 回复文本（可滚动）
 } AppState;
 
 static AppState s_state = STATE_IDLE_NO_KEY;
 
-// ── 配色（深蓝底 + 青蓝圆 + 亮青强调）────────────────────────────────────────
-#define C_BG          GColorWhite
-#define C_CIRCLE      GColorPictonBlue
-#define C_CIRCLE_DIM  GColorLightGray
-#define C_ACCENT      GColorBlue
-#define C_ACCENT_DIM  GColorPictonBlue
-#define C_TEXT_DARK   GColorWhite        // 圆上的文字
-#define C_TEXT_LIGHT  GColorBlack        // 白底上的文字
-#define C_SUBTITLE    GColorDarkGray
-#define C_DOT_ON      GColorBlue
-#define C_DOT_OFF     GColorLightGray
+// ── 配色方案 ──────────────────────────────────────────────────────────────────
+// 白色底 + 蓝色系主色调，与菜单、动画、文字共用同一套色值
+#define C_BG          GColorWhite       // 全局背景
+#define C_CIRCLE      GColorPictonBlue  // 主圆圈填充色
+#define C_CIRCLE_DIM  GColorLightGray   // 未就绪时的圆圈填充色
+#define C_ACCENT      GColorBlue        // 强调色（标题、活跃状态）
+#define C_ACCENT_DIM  GColorPictonBlue  // 淡化强调色（呼吸光环）
+#define C_TEXT_DARK   GColorWhite       // 圆圈上的文字（白色）
+#define C_TEXT_LIGHT  GColorBlack       // 白底上的文字（黑色）
+#define C_SUBTITLE    GColorDarkGray    // 副标题/非活跃文字
+#define C_DOT_ON      GColorBlue        // 活跃圆点（动画、菜单标记）
+#define C_DOT_OFF     GColorLightGray   // 非活跃圆点
 
 // ── 布局常量 ─────────────────────────────────────────────────────────────────
 #define CIRCLE_R_SMALL  14
@@ -47,14 +68,13 @@ static int s_circle_target_x;// 收缩动画的目标 X
 static int s_morph_step;     // 缩放动画步数
 #define MORPH_TOTAL 18       // 动画总帧数
 
-static int s_pulse_phase = 0;
-static int s_spinner_angle = 0;  // THINKING 旋转角度
+static int s_pulse_phase = 0;        // 呼吸动画相位（IDLE 光环 + THINKING 圆呼吸共用）
+static int s_spinner_angle = 0;      // THINKING 旋转小点角度（每帧 +15°）
 
-// 真正的网络流，不需要打字机本地延迟
-static bool s_user_scrolled = false;  // 用户手动滚动过则停止自动滚动
+static bool s_user_scrolled = false;  // 用户手动滚动过则停止自动滚动到底部
 
 static AppTimer *s_thinking_timeout = NULL;
-#define THINKING_TIMEOUT_MS 90000  // 90秒超时
+#define THINKING_TIMEOUT_MS 90000    // THINKING 状态超时 90 秒（从 SENDING 开始算）
 
 
 // ── UI 元素 ──────────────────────────────────────────────────────────────────
@@ -125,7 +145,11 @@ static void show_chat_list(void);
 static void show_model_select(void);
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 无需本地假流式效果，直接刷新文本框与滚动区域
+// 回复文本刷新
+//
+// 由于采用非流式 API，文本到达后直接设置到 TextLayer，
+// 同时动态调整 ScrollLayer 可滚动区域大小以适应文本长度。
+// ═══════════════════════════════════════════════════════════════════════════════
 static void update_response_text(void) {
   text_layer_set_text(s_reply_layer, s_reply_buf);
 
@@ -182,6 +206,7 @@ static void draw_breathe_ring(GContext *ctx, int cx, int cy, int r) {
   graphics_draw_circle(ctx, GPoint(cx, cy), r + 3 + offset / 3);
 }
 
+// THINKING 旋转小点：12 个等距圆点围绕主圆排列，2 个"头部"点变大变蓝形成旋转效果
 static void draw_spinner(GContext *ctx, int cx, int cy, int r) {
   int dot_count = 12;
   int dot_r_big = 4;
@@ -207,7 +232,7 @@ static void draw_spinner(GContext *ctx, int cx, int cy, int r) {
   }
 }
 
-// 3 个跳动点
+// RECORDING 状态的 3 个跳动圆点（依次弹起形成波浪效果）
 static void draw_dots(GContext *ctx, int cx, int cy) {
   int spacing = 20;
   for (int i = 0; i < 3; i++) {
@@ -253,7 +278,7 @@ static void draw_text(GContext *ctx, const char *text,
 // 主绘制
 // ═══════════════════════════════════════════════════════════════════════════════
 static void canvas_draw(Layer *layer, GContext *ctx) {
-  // 黑色背景
+  // 清屏（白色背景）
   graphics_context_set_fill_color(ctx, C_BG);
   graphics_fill_rect(ctx, layer_get_bounds(layer), 0, GCornerNone);
 
@@ -346,7 +371,10 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 动画
+// 动画引擎
+//
+// 统一的帧驱动机制：所有动画共用 anim_tick 回调，根据当前状态执行不同逻辑
+// 帧率：IDLE 10fps（省电）→ THINKING/RECORDING 20fps → SHRINKING/EXPANDING 40fps（流畅）
 // ═══════════════════════════════════════════════════════════════════════════════
 static void start_anim(void) {
   s_anim_frame = 0;
@@ -540,7 +568,17 @@ static void set_state(AppState new_state) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// AppMessage
+// AppMessage 接收处理
+//
+// 处理来自手机端的所有消息：
+//   READY_STATUS  — API Key 状态（决定 IDLE_NO_KEY / IDLE_READY）
+//   CHAT_LIST     — 对话列表数据
+//   SWITCH_CHAT   — 当前活跃对话 ID
+//   MODEL_NAME    — 模型列表数据
+//   REPLY_CHUNK   — AI 回复分块（蓝牙 256 字节限制）
+//   REPLY_END     — 回复结束标记
+//   REPLY         — 完整回复（兜底）
+//   STATUS        — 错误消息
 // ═══════════════════════════════════════════════════════════════════════════════
 static void inbox_received(DictionaryIterator *iter, void *context) {
   Tuple *ready_t = dict_find(iter, MESSAGE_KEY_READY_STATUS);
@@ -659,7 +697,14 @@ static void outbox_failed(DictionaryIterator *iter, AppMessageResult reason, voi
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 按钮
+// 按钮交互
+//
+// SELECT 短按：IDLE_READY → 语音输入 / RESPONSE → 回到大圆
+// SELECT 长按：新建对话
+// UP 短按：RESPONSE → 向上滚动 / 其他 → 打开对话列表菜单
+// UP 长按：始终打开对话列表菜单
+// DOWN 短按：RESPONSE → 向下滚动 / 其他 → 打开对话列表菜单
+// DOWN 长按：彩蛋（随机发送预设问题）
 // ═══════════════════════════════════════════════════════════════════════════════
 static void select_handler(ClickRecognizerRef r, void *ctx) {
   if (s_state == STATE_IDLE_READY) {
@@ -734,6 +779,7 @@ static void up_long_handler(ClickRecognizerRef r, void *ctx) {
   show_chat_list();
 }
 
+// DOWN 短按：回复页面向下滚动 60px，其他状态打开菜单
 static void down_handler(ClickRecognizerRef r, void *ctx) {
   if (s_state == STATE_RESPONSE) {
     GPoint offset = scroll_layer_get_content_offset(s_scroll_layer);
@@ -744,6 +790,7 @@ static void down_handler(ClickRecognizerRef r, void *ctx) {
   }
 }
 
+// DOWN 长按：彩蛋功能 —— 随机发送一个预设趣味问题给 AI
 static void down_long_handler(ClickRecognizerRef r, void *ctx) {
   if (s_state == STATE_SENDING || s_state == STATE_THINKING ||
       s_state == STATE_SHRINKING || s_state == STATE_EXPANDING) {
@@ -773,6 +820,7 @@ static void down_long_handler(ClickRecognizerRef r, void *ctx) {
   }
 }
 
+// 注册所有按钮事件（长按判定阈值 700ms）
 static void click_config(void *ctx) {
   window_single_click_subscribe(BUTTON_ID_SELECT, select_handler);
   window_long_click_subscribe(BUTTON_ID_SELECT, 700, select_long_handler, NULL);
@@ -862,7 +910,17 @@ static void window_appear(Window *window) {
   // 刷新以确保显示最新状态
   layer_mark_dirty(s_canvas_layer);
 }
-// 对话列表窗口 (MenuLayer) — row 0: 模型, row 1: 新对话, row 2+: 对话列表
+// ═══════════════════════════════════════════════════════════════════════════════
+// 对话列表窗口 (MenuLayer)
+//
+// 菜单结构：
+//   row 0     — 模型行（显示当前模型名，点击打开模型选择子菜单）
+//   row 1     — 「+ START NEW CHAT」按钮
+//   row 2+    — 历史对话列表（活跃对话有 Celeste 底色 + 蓝点标记）
+//
+// 配色规则：
+//   模型行 / 新建对话：无底色，蓝字 (C_ACCENT)，高亮时 CobaltBlue 底 + 白字
+//   对话行：白底（活跃为 Celeste），高亮时 CobaltBlue 底 + 白字
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // 提取模型短名：取最后一个 '/' 后的部分
@@ -1249,14 +1307,17 @@ static void parse_model_list(const char *data) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// App
+// App 生命周期
 // ═══════════════════════════════════════════════════════════════════════════════
 static void init(void) {
-  srand(time(NULL));
+  srand(time(NULL));  // 初始化随机数种子（用于彩蛋问题随机选择）
+
+  // 注册 AppMessage 回调
   app_message_register_inbox_received(inbox_received);
   app_message_register_inbox_dropped(inbox_dropped);
   app_message_register_outbox_sent(outbox_sent);
   app_message_register_outbox_failed(outbox_failed);
+  // 使用最大缓冲区（Basalt: inbox 8200 / outbox 2048）
   app_message_open(app_message_inbox_size_maximum(), app_message_outbox_size_maximum());
 
   // 初始化模型显示名
@@ -1271,6 +1332,7 @@ static void init(void) {
   window_stack_push(s_window, true);
 }
 
+// 清理所有资源（定时器、语音会话、子窗口、主窗口）
 static void deinit(void) {
   stop_anim();
   if (s_thinking_timeout) app_timer_cancel(s_thinking_timeout);

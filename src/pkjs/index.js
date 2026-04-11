@@ -1,15 +1,34 @@
-// PEBBLEKIT JS — runs on iPhone
-// 多对话管理 + OpenRouter API + LLM 自动生成对话标题
+// ═══════════════════════════════════════════════════════════════════════════════
+// PEBBLEKIT JS — 运行在手机端 (PebbleKit JS 是 ES5 引擎，禁止使用 ES6+)
+//
+// 架构概览:
+//   手表 (C) ←→ AppMessage (蓝牙) ←→ 手机 (PebbleKit JS) ←→ OpenRouter API
+//
+// 本文件职责：
+//   1. 管理多对话存储 (localStorage)
+//   2. 向 OpenRouter API 发送非流式请求并解析回复
+//   3. 自动调用 LLM 为新对话生成短标题
+//   4. 通过 AppMessage 与手表端通讯（分块传输、队列管理）
+//   5. 处理配置页面的设置读写
+// ═══════════════════════════════════════════════════════════════════════════════
 
-var MAX_MESSAGES_PER_CHAT = 20;
-var MAX_CHATS = 20;             // 限制 20 个对话槽位
-var MAX_WATCH_CHATS = 20;       // 手表端菜单最多显示 20 个历史对话
-var MAX_CONFIG_CHATS = 8;       // 配置页面按倒序传递 8 个，保障蓝牙与 URL 组装性能（全量细节存在于 Hash 传输中）
+var MAX_MESSAGES_PER_CHAT = 20; // 每个对话最多保留的消息条数（防 localStorage 过大）
+var MAX_CHATS = 20;             // 对话槽位上限（超出时淘汰最旧的）
+var MAX_WATCH_CHATS = 20;       // 手表端菜单最多显示的历史对话数
+var MAX_CONFIG_CHATS = 8;       // 配置页面传送的对话数（URL + Hash 有长度限制）
 
+// 默认 System Prompt：强制简洁回复、禁止 Markdown，适应手表小屏幕
 var DEFAULT_PROMPT = "You are Pebble Wrist AI, a concise assistant on a Pebble smartwatch. Rules: 1) Reply ONLY with the final answer, no reasoning or thinking process. 2) Keep responses under 400 words in English, or under 400 Chinese characters. 3) No markdown, no bullet lists. 4) Use plain sentences only.";
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 文本清洗：完美解决 Pebble 缺失某些 Unicode 标点引发乱码（â☐☐）的问题
+// 文本清洗
+//
+// Pebble 显示不了大部分 Unicode 特殊标点（智能引号、破折号、省略号等），
+// LLM 返回的文本里经常包含这些字符，在手表上会渲染为乱码。
+//
+// 注意：PebbleKit JS 的 XHR 引擎可能不按 UTF-8 解码响应，
+// 导致 3 字节 UTF-8 序列（如 E2 80 99 = U+2019 '）拆成 3 个 Latin-1 字符，
+// 因此除了标准 Unicode 替换，还需要匹配 raw UTF-8 字节序列作为兜底。
 // ═══════════════════════════════════════════════════════════════════════════════
 function sanitizePebbleText(text) {
   if (!text) return '';
@@ -44,7 +63,12 @@ function safeJsonStringify(obj) {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 数据层：多对话存储
+//
+// 数据结构 (localStorage key: 'chat_store'):
+//   { active_id: string|null, chats: [{id, title, created, messages: [{role, content}]}] }
 // ═══════════════════════════════════════════════════════════════════════════════
+
+// 生成唯一 ID：时间戳(base36) + 随机数(base36)，总长约 13 字符
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).substring(2, 7);
 }
@@ -110,7 +134,8 @@ function getSetting(key, defaultVal) {
   return localStorage.getItem(key) || defaultVal;
 }
 
-var currentAskSessionId = 0; // 全局自增，用于阻截孤魂回调
+// 全局自增会话ID：每次新请求 +1，旧请求的回调通过比对此值判断是否已过期
+var currentAskSessionId = 0;
 
 // ── AppMessage 发送信使（严格排队机制）────────────────────────────────────────
 // 解决 Pebble 原生单次通讯不能超过 256 字节的物理缺陷。此处设立指令队列，确保分块传输时不会丢包或乱序
@@ -281,7 +306,12 @@ function generateTitle(chatId, userMsg, aiReply) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// OpenRouter API
+// OpenRouter API 调用
+//
+// 采用非流式 (stream: false) 模式：
+//   - PebbleKit JS 的 XHR 引擎不支持流式 responseText（onprogress 崩溃）
+//   - 非流式一次性返回完整 JSON，稳定可靠
+//   - 超时 80秒（大模型思考可能较慢）
 // ═══════════════════════════════════════════════════════════════════════════════
 function askAI(question, onChunk, onFinish) {
   currentAskSessionId++;
