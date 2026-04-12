@@ -598,16 +598,15 @@ static void pulse_tick(void *data) {
 
   s_pulse_frame++;
 
-  // 脉冲曲线：正弦上升 +8px → 回弹 -2px → 归零
-  // 幅度 8% 缩放在 Pebble 144px 屏上清晰可见
-  if (s_pulse_frame <= 6) {
-    // 帧 1-6: 正弦半周 0 → +8 → 0
-    int deg = s_pulse_frame * 180 / 6;
+  // 脉冲曲线：10帧膨胀 + 6帧回弹，每帧最大跳 2-3px，视觉平滑
+  if (s_pulse_frame <= 10) {
+    // 帧 1-10: 正弦半周 0 → +8 → 0
+    int deg = s_pulse_frame * 180 / 10;
     int32_t angle = (deg * TRIG_MAX_ANGLE) / 360;
     s_heartbeat = (sin_lookup(angle) * 8) / TRIG_MAX_RATIO;
-  } else if (s_pulse_frame <= 10) {
-    // 帧 7-10: 回弹 0 → -2 → 0
-    int deg = (s_pulse_frame - 6) * 180 / 4;
+  } else if (s_pulse_frame <= 16) {
+    // 帧 11-16: 回弹 0 → -2 → 0
+    int deg = (s_pulse_frame - 10) * 180 / 6;
     int32_t angle = (deg * TRIG_MAX_ANGLE) / 360;
     s_heartbeat = -(sin_lookup(angle) * 2) / TRIG_MAX_RATIO;
   } else {
@@ -749,7 +748,8 @@ static void set_state(AppState new_state) {
     case STATE_IDLE_NO_KEY:
     case STATE_IDLE_READY:
       s_logo_morph = 0;       // 重置为完整 Wi logo
-      s_heartbeat = 0;        // 静态起步，由 pulse_tick 驱动偶发脉冲
+      s_heartbeat = 0;        // 确保静态起步
+      s_pulse_frame = 0;      // 重置脉冲帧计数（防中途打断后残留）
       schedule_pulse();
       break;
     case STATE_RECORDING:
