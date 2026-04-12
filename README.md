@@ -19,10 +19,7 @@ Works with OpenRouter (GPT, Claude, Gemini, Gemma, Llama, Qwen, and more) or you
 - **Custom API Support** — Use OpenRouter out of the box, or point the app to your own backend / local model server with a custom API URL.
 - **Conversation Export** — Export any conversation as a structured JSON file (with messages, timestamps, and model info) from the config page.
 - **"Surprise Me"** — Long-press DOWN for a random prompt: jokes, fun facts, recipes, or thought-provoking questions.
-- **Custom Wi Logo** — A hand-drawn "Wi" logo rendered natively in C, with pulse animation, morph transitions between states, and a shadow layer for depth.
-- **Random Color Theme** — Each app launch picks a random background color from a 12-color palette, with a 5-stripe color bar accent on the response page. Every session looks a little different.
-- **Smooth Animations** — State-driven animation system: 3-dot bounce while listening, arrow animation while sending, spinning circle with orbiting dot while thinking, and ease-out morph transitions between the main circle and response view.
-- **Round Screen Support** — Fully optimized layouts for Pebble Time Round (Chalk) with centered positioning and text-wrap adaptation.
+- **Cross-Platform** — Supports all Pebble hardware including Pebble Time Round (Chalk) with fully optimized centered layouts.
 - **Serverless & Private** — Your phone talks directly to the API. Conversations are stored locally on your phone's localStorage. Nothing leaves your device except the API request itself.
 - **Dark-Themed Config Page** — A modern settings interface inside the Pebble companion app for API keys, system prompts, model lists, and conversation management.
 
