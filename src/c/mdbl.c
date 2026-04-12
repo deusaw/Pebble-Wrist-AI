@@ -95,7 +95,8 @@ static int s_heartbeat = 0;          // 脉冲偏移 (±px)
 // 偶发脉冲动效（代替持续心跳）
 static AppTimer *s_pulse_timer = NULL;
 static int s_pulse_frame = 0;
-#define PULSE_INTERVAL_MS 6000       // 静止 6 秒后触发一次脉冲
+#define PULSE_INTERVAL_MS 4000       // 静止 4 秒后触发一次脉冲
+#define PULSE_FIRST_MS    1500       // 首次脉冲更快（1.5 秒后）
 
 static bool s_user_scrolled = false;  // 用户手动滚动过则停止自动滚动到底部
 
@@ -578,15 +579,17 @@ static void stop_anim(void) {
 }
 
 // ── 偶发脉冲动效 ─────────────────────────────────────────────────────────────
-// 静止 6 秒 → 一次快速 pulse（+3px → 0 → -1px → 0，~360ms）→ 再静止 6 秒
-// 90% 时间零 CPU 开销，比持续心跳省电且不窒息
+// 静止 4 秒 → 一次快速 pulse → 再静止 4 秒
+// 90% 时间零 CPU 开销
 
 static void schedule_pulse(void) {
   if (s_pulse_timer) {
     app_timer_cancel(s_pulse_timer);
     s_pulse_timer = NULL;
   }
-  s_pulse_timer = app_timer_register(PULSE_INTERVAL_MS, pulse_tick, NULL);
+  // 首次脉冲更快出现（1.5秒），后续间隔 4 秒
+  int delay = (s_pulse_frame == 0 && s_heartbeat == 0) ? PULSE_FIRST_MS : PULSE_INTERVAL_MS;
+  s_pulse_timer = app_timer_register(delay, pulse_tick, NULL);
 }
 
 static void pulse_tick(void *data) {
@@ -595,19 +598,20 @@ static void pulse_tick(void *data) {
 
   s_pulse_frame++;
 
-  // 脉冲曲线：正弦上升 → 微小回弹 → 归零
+  // 脉冲曲线：正弦上升 +8px → 回弹 -2px → 归零
+  // 幅度 8% 缩放在 Pebble 144px 屏上清晰可见
   if (s_pulse_frame <= 6) {
-    // 帧 1-6: 正弦半周 0→+3→0
+    // 帧 1-6: 正弦半周 0 → +8 → 0
     int deg = s_pulse_frame * 180 / 6;
     int32_t angle = (deg * TRIG_MAX_ANGLE) / 360;
-    s_heartbeat = (sin_lookup(angle) * 3) / TRIG_MAX_RATIO;
+    s_heartbeat = (sin_lookup(angle) * 8) / TRIG_MAX_RATIO;
   } else if (s_pulse_frame <= 10) {
-    // 帧 7-10: 小回弹 0→-1→0
+    // 帧 7-10: 回弹 0 → -2 → 0
     int deg = (s_pulse_frame - 6) * 180 / 4;
     int32_t angle = (deg * TRIG_MAX_ANGLE) / 360;
-    s_heartbeat = -(sin_lookup(angle) * 1) / TRIG_MAX_RATIO;
+    s_heartbeat = -(sin_lookup(angle) * 2) / TRIG_MAX_RATIO;
   } else {
-    // 脉冲结束，恢复静态，等待下次
+    // 脉冲结束，恢复静态
     s_heartbeat = 0;
     s_pulse_frame = 0;
     layer_mark_dirty(s_canvas_layer);
@@ -616,7 +620,7 @@ static void pulse_tick(void *data) {
   }
 
   layer_mark_dirty(s_canvas_layer);
-  s_pulse_timer = app_timer_register(33, pulse_tick, NULL);  // ~30fps 脉冲中
+  s_pulse_timer = app_timer_register(33, pulse_tick, NULL);  // ~30fps
 }
 
 static void anim_tick(void *data) {
