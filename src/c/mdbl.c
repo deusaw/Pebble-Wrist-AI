@@ -87,11 +87,15 @@ static int s_circle_target_x;// 收缩动画的目标 X
 static int s_morph_step;     // 缩放动画步数
 #define MORPH_TOTAL 18       // 动画总帧数
 
-static int s_pulse_phase = 0;        // 动画相位（心跳 + 动画共用）
 static int s_arc_angle = 0;          // thinking 旋转弧线角度
 static int s_logo_morph = 0;         // Wi→圆 变形进度 (0=Wi logo, 16=完整圆环)
 #define LOGO_MORPH_TOTAL 16
-static int s_heartbeat = 0;          // 心跳偏移 (±2px)
+static int s_heartbeat = 0;          // 脉冲偏移 (±px)
+
+// 偶发脉冲动效（代替持续心跳）
+static AppTimer *s_pulse_timer = NULL;
+static int s_pulse_frame = 0;
+#define PULSE_INTERVAL_MS 6000       // 静止 6 秒后触发一次脉冲
 
 static bool s_user_scrolled = false;  // 用户手动滚动过则停止自动滚动到底部
 
@@ -157,6 +161,8 @@ static int s_width, s_height;
 // ── 前向声明 ─────────────────────────────────────────────────────────────────
 static void set_state(AppState new_state);
 static void anim_tick(void *data);
+static void pulse_tick(void *data);
+static void schedule_pulse(void);
 static void dictation_callback(DictationSession *session,
                                 DictationSessionStatus status,
                                 char *transcription,
@@ -335,20 +341,6 @@ static void draw_wi_logo(GContext *ctx, int cx, int cy, int scale,
   graphics_context_set_stroke_width(ctx, sw);
   for (int i = 0; i < 8; i++)
     graphics_draw_line(ctx, pts[i], pts[i + 1]);
-
-  // 蓝色横线（W 内形成 A 的横杠）— 小尺寸下省略
-  if (m < mt * 2 / 3 && keep >= 50) {
-    graphics_context_set_stroke_color(ctx, GColorPictonBlue);
-    graphics_context_set_stroke_width(ctx, 2);
-    // 横线在 W 左 V 的中间高度（pts[0]和pts[2]之间，约 y=0 处）
-    int bar_y = cy + 0 * keep / 100;
-    // 横线从左臂中段到中峰过渡段
-    int bar_x1 = cx + (-16) * keep / 100;
-    int bar_x2 = cx + (-4) * keep / 100;
-    graphics_draw_line(ctx, GPoint(bar_x1, bar_y), GPoint(bar_x2, bar_y));
-    graphics_context_set_stroke_color(ctx, color);
-    graphics_context_set_stroke_width(ctx, sw);
-  }
 
   // i 竖线
   graphics_draw_line(ctx, i_top, i_bot);
@@ -579,21 +571,59 @@ static void stop_anim(void) {
     app_timer_cancel(s_anim_timer);
     s_anim_timer = NULL;
   }
+  if (s_pulse_timer) {
+    app_timer_cancel(s_pulse_timer);
+    s_pulse_timer = NULL;
+  }
+}
+
+// ── 偶发脉冲动效 ─────────────────────────────────────────────────────────────
+// 静止 6 秒 → 一次快速 pulse（+3px → 0 → -1px → 0，~360ms）→ 再静止 6 秒
+// 90% 时间零 CPU 开销，比持续心跳省电且不窒息
+
+static void schedule_pulse(void) {
+  if (s_pulse_timer) {
+    app_timer_cancel(s_pulse_timer);
+    s_pulse_timer = NULL;
+  }
+  s_pulse_timer = app_timer_register(PULSE_INTERVAL_MS, pulse_tick, NULL);
+}
+
+static void pulse_tick(void *data) {
+  s_pulse_timer = NULL;
+  if (s_state != STATE_IDLE_NO_KEY && s_state != STATE_IDLE_READY) return;
+
+  s_pulse_frame++;
+
+  // 脉冲曲线：正弦上升 → 微小回弹 → 归零
+  if (s_pulse_frame <= 6) {
+    // 帧 1-6: 正弦半周 0→+3→0
+    int deg = s_pulse_frame * 180 / 6;
+    int32_t angle = (deg * TRIG_MAX_ANGLE) / 360;
+    s_heartbeat = (sin_lookup(angle) * 3) / TRIG_MAX_RATIO;
+  } else if (s_pulse_frame <= 10) {
+    // 帧 7-10: 小回弹 0→-1→0
+    int deg = (s_pulse_frame - 6) * 180 / 4;
+    int32_t angle = (deg * TRIG_MAX_ANGLE) / 360;
+    s_heartbeat = -(sin_lookup(angle) * 1) / TRIG_MAX_RATIO;
+  } else {
+    // 脉冲结束，恢复静态，等待下次
+    s_heartbeat = 0;
+    s_pulse_frame = 0;
+    layer_mark_dirty(s_canvas_layer);
+    schedule_pulse();
+    return;
+  }
+
+  layer_mark_dirty(s_canvas_layer);
+  s_pulse_timer = app_timer_register(33, pulse_tick, NULL);  // ~30fps 脉冲中
 }
 
 static void anim_tick(void *data) {
   s_anim_frame++;
-  s_pulse_phase++;
 
-  // 心跳动效（idle 状态，±2px 正弦平滑脉冲）
-  if (s_state == STATE_IDLE_NO_KEY || s_state == STATE_IDLE_READY) {
-    // 周期 40 帧 × 100ms = 4 秒一个完整心跳
-    int phase_deg = (s_pulse_phase % 40) * 360 / 40;
-    int32_t angle = (phase_deg * TRIG_MAX_ANGLE) / 360;
-    s_heartbeat = (sin_lookup(angle) * 3) / TRIG_MAX_RATIO;  // ±3px 平滑
-  } else {
-    s_heartbeat = 0;
-  }
+  // IDLE 状态不再走 anim_tick，由 pulse_tick 独立驱动
+  s_heartbeat = 0;
 
   // Wi→圆 morph 驱动
   if (s_state == STATE_RECORDING || s_state == STATE_SENDING ||
@@ -652,16 +682,6 @@ static void anim_tick(void *data) {
 
   int interval = 50;  // 默认 20fps
   if (s_state == STATE_SHRINKING || s_state == STATE_EXPANDING) interval = 25;  // 40fps
-  if (s_state == STATE_IDLE_NO_KEY || s_state == STATE_IDLE_READY) {
-    interval = 100;  // 10fps（心跳平滑）
-    // 60 秒后停止动画省电（600帧 × 100ms）
-    if (s_anim_frame > 600) {
-      s_heartbeat = 0;
-      layer_mark_dirty(s_canvas_layer);  // 最后一帧重绘为静态
-      s_anim_timer = NULL;
-      return;
-    }
-  }
   s_anim_timer = app_timer_register(interval, anim_tick, NULL);
 }
 
@@ -725,7 +745,8 @@ static void set_state(AppState new_state) {
     case STATE_IDLE_NO_KEY:
     case STATE_IDLE_READY:
       s_logo_morph = 0;       // 重置为完整 Wi logo
-      start_anim();
+      s_heartbeat = 0;        // 静态起步，由 pulse_tick 驱动偶发脉冲
+      schedule_pulse();
       break;
     case STATE_RECORDING:
     case STATE_SENDING:
