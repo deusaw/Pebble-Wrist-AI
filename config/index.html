@@ -79,6 +79,24 @@
     .chat-btn-switch { background: #0047AB; }
     .chat-btn-delete { background: #441111; }
     .empty { color: #556; font-size: 13px; text-align: center; padding: 20px; }
+
+    /* 显示设置 */
+    .radio-group { display: flex; gap: 0; border-radius: 6px; overflow: hidden; }
+    .radio-btn {
+      flex: 1; padding: 10px; border: 1px solid #223; background: #111; color: #888;
+      font-size: 13px; text-align: center; cursor: pointer; transition: all 0.15s;
+    }
+    .radio-btn.active { background: #0047AB; color: #fff; border-color: #0047AB; }
+    .radio-btn:first-child { border-radius: 6px 0 0 6px; }
+    .radio-btn:last-child { border-radius: 0 6px 6px 0; }
+    .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 10px; background: #111; border-radius: 6px; margin-bottom: 8px; }
+    .toggle-label { font-size: 14px; color: #ddd; }
+    .toggle-switch { position: relative; width: 44px; height: 24px; cursor: pointer; }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: #333; border-radius: 12px; transition: background 0.2s; }
+    .toggle-slider::before { content: ''; position: absolute; width: 18px; height: 18px; left: 3px; bottom: 3px; background: #fff; border-radius: 50%; transition: transform 0.2s; }
+    .toggle-switch input:checked + .toggle-slider { background: #0047AB; }
+    .toggle-switch input:checked + .toggle-slider::before { transform: translateX(20px); }
   </style>
 </head>
 <body>
@@ -117,6 +135,38 @@
   <div class="field">
     <label>System Prompt</label>
     <textarea id="system_message"></textarea>
+  </div>
+
+  <!-- 显示设置 -->
+  <div class="field">
+    <label>Font Size</label>
+    <div class="radio-group">
+      <div class="radio-btn active" data-size="0" id="font_size_s">S</div>
+      <div class="radio-btn" data-size="1" id="font_size_m">M</div>
+      <div class="radio-btn" data-size="2" id="font_size_l">L</div>
+    </div>
+    <div class="hint">Reply text size on watch</div>
+  </div>
+
+  <div class="field">
+    <div class="toggle-row">
+      <span class="toggle-label">Bold Text</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="font_bold">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+  </div>
+
+  <div class="field">
+    <div class="toggle-row">
+      <span class="toggle-label">Enable Surprise Me</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="enable_surprise" checked>
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div class="hint">Long-press DOWN to send a random question</div>
   </div>
 
   <button class="btn btn-primary" id="save">Save Settings</button>
@@ -175,6 +225,11 @@
     var apiMode = getParam('api_mode') || 'openrouter';
     var customApiUrl = getParam('custom_api_url') || '';
 
+    // 显示设置
+    var fontSize = getParam('font_size') || '0';
+    var fontBold = getParam('font_bold') === '1';
+    var disableSurprise = getParam('disable_surprise') === '1';
+
     function applyApiMode(mode) {
       apiMode = mode;
       var btnOR = document.getElementById('mode_openrouter');
@@ -200,6 +255,30 @@
     // 初始化模式
     if (customApiUrl) document.getElementById('custom_api_url').value = customApiUrl;
     applyApiMode(apiMode);
+
+    // 初始化显示设置
+    var fontSizeBtns = document.querySelectorAll('.radio-btn[data-size]');
+    for (var fi = 0; fi < fontSizeBtns.length; fi++) {
+      if (fontSizeBtns[fi].getAttribute('data-size') === fontSize) {
+        fontSizeBtns[fi].className = 'radio-btn active';
+      } else {
+        fontSizeBtns[fi].className = 'radio-btn';
+      }
+    }
+    document.querySelectorAll('.radio-group').forEach(function(group) {
+      group.addEventListener('click', function(e) {
+        var btn = e.target;
+        if (!btn.classList.contains('radio-btn')) return;
+        var siblings = btn.parentElement.querySelectorAll('.radio-btn');
+        for (var si = 0; si < siblings.length; si++) {
+          siblings[si].className = 'radio-btn';
+        }
+        btn.className = 'radio-btn active';
+        fontSize = btn.getAttribute('data-size');
+      });
+    });
+    document.getElementById('font_bold').checked = fontBold;
+    document.getElementById('enable_surprise').checked = !disableSurprise;
 
     // 填充设置
     document.getElementById('key_status').textContent =
@@ -314,7 +393,10 @@
         model_list: modelList,
         system_message: document.getElementById('system_message').value.trim(),
         api_mode: apiMode,
-        custom_api_url: document.getElementById('custom_api_url').value.trim()
+        custom_api_url: document.getElementById('custom_api_url').value.trim(),
+        font_size: parseInt(fontSize, 10),
+        font_bold: document.getElementById('font_bold').checked ? 1 : 0,
+        disable_surprise: document.getElementById('enable_surprise').checked ? 0 : 1
       };
       var key = document.getElementById('api_key').value.trim();
       if (key.length > 0) s.api_key = key;

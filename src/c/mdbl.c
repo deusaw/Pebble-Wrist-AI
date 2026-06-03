@@ -146,7 +146,15 @@ static Window    *s_model_window;
 static MenuLayer *s_model_menu_layer;
 
 // ── 持久存储 key ─────────────────────────────────────────────────────────────
-#define PERSIST_KEY_READY 1
+#define PERSIST_KEY_READY            1
+#define PERSIST_KEY_FONT_SIZE        2  // 字号: 0=Normal, 1=Large, 2=Extra Large
+#define PERSIST_KEY_FONT_BOLD        3  // 加粗: 0=否, 1=是
+#define PERSIST_KEY_DISABLE_SURPRISE 4  // 禁用彩蛋: 0=启用, 1=禁用
+
+// ── 字体设置 ──────────────────────────────────────────────────────────────────
+static int s_font_size = 0;       // 0=Normal, 1=Large, 2=Extra Large
+static int s_font_bold = 0;       // 0=不加粗, 1=加粗
+static int s_disable_surprise = 0; // 0=启用彩蛋, 1=禁用彩蛋
 
 #define R_BUF_SIZE 2048
 static char s_reply_buf[R_BUF_SIZE];
@@ -201,6 +209,45 @@ static void update_response_text(void) {
       }
     }
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 字体设置应用
+//
+// 根据 s_font_size 和 s_font_bold 选择回复区域和问题显示的字体，
+// 并动态调整问题显示层高度。标题行（canvas_draw 中）在调用时也需联动。
+// ═══════════════════════════════════════════════════════════════════════════════
+static GFont get_reply_font(void) {
+  if (s_font_size == 2) return s_font_bold ? fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD) : fonts_get_system_font(FONT_KEY_GOTHIC_28);
+  if (s_font_size == 1) return s_font_bold ? fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD) : fonts_get_system_font(FONT_KEY_GOTHIC_24);
+  return s_font_bold ? fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD) : fonts_get_system_font(FONT_KEY_GOTHIC_18);
+}
+
+static GFont get_question_font(void) {
+  if (s_font_size == 2) return s_font_bold ? fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD) : fonts_get_system_font(FONT_KEY_GOTHIC_24);
+  if (s_font_size == 1) return s_font_bold ? fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD) : fonts_get_system_font(FONT_KEY_GOTHIC_18);
+  return s_font_bold ? fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD) : fonts_get_system_font(FONT_KEY_GOTHIC_14);
+}
+
+static int get_question_layer_height(void) {
+  if (s_font_size == 2) return 60;
+  if (s_font_size == 1) return 52;
+  return 44;
+}
+
+static void apply_font_settings(void) {
+  text_layer_set_font(s_reply_layer, get_reply_font());
+  text_layer_set_font(s_question_display_layer, get_question_font());
+  int q_h = get_question_layer_height();
+  layer_set_frame(text_layer_get_layer(s_question_display_layer), GRect(10, 0, s_width - 20, q_h));
+  if (s_state == STATE_RESPONSE) {
+    // 重算回复层 y 偏移，适配新问题层高度
+    GSize q_size = text_layer_get_content_size(s_question_display_layer);
+    int reply_y = q_size.h + 12;
+    layer_set_frame(text_layer_get_layer(s_reply_layer), GRect(8, reply_y, s_width - 16, 2000));
+    update_response_text();
+  }
+  layer_mark_dirty(s_canvas_layer);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -533,7 +580,13 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
       draw_color_bar(ctx);
 
       const char *title = (s_active_chat_index >= 0 && s_active_chat_index < s_chat_count) ? s_chat_entries[s_active_chat_index].title : "New chat";
-      GSize title_size = graphics_text_layout_get_content_size(title, fonts_get_system_font(FONT_KEY_GOTHIC_14), GRect(0, 0, s_width, 20), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+      // Response 标题字体联动字号设置：Normal→GOTHIC_14_BOLD, Large→GOTHIC_18_BOLD, X-Large→GOTHIC_24_BOLD
+      GFont title_font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
+      int title_h = 20;
+      int title_y_off = -7;  // Normal 字体偏移
+      if (s_font_size == 2) { title_font = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD); title_h = 28; title_y_off = -14; }
+      else if (s_font_size == 1) { title_font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD); title_h = 24; title_y_off = -10; }
+      GSize title_size = graphics_text_layout_get_content_size(title, title_font, GRect(0, 0, s_width, title_h), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
       // 小 Wi logo + 标题居中排列
       int wi_w = 20;  // 缩小版 Wi 宽度
       int total_w = wi_w + 5 + title_size.w;
@@ -543,8 +596,8 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
       draw_wi_logo(ctx, wi_cx, CIRCLE_Y_SMALL, 30, 0, GColorDarkGray, false, 0);
       // 标题
       graphics_context_set_text_color(ctx, GColorDarkGray);
-      GRect title_box = GRect(start_x + wi_w + 5, CIRCLE_Y_SMALL - 7, title_size.w + 10, 20);
-      graphics_draw_text(ctx, title, fonts_get_system_font(FONT_KEY_GOTHIC_14), title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      GRect title_box = GRect(start_x + wi_w + 5, CIRCLE_Y_SMALL + title_y_off, title_size.w + 10, title_h);
+      graphics_draw_text(ctx, title, title_font, title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
       // 分隔线
       graphics_context_set_fill_color(ctx, GColorLightGray);
       graphics_fill_rect(ctx, GRect(s_width / 4, CIRCLE_Y_SMALL + CIRCLE_R_SMALL + 6, s_width / 2, 1), 0, GCornerNone);
@@ -764,7 +817,11 @@ static void set_state(AppState new_state) {
       s_circle_y = s_circle_y_big;
       {
         const char *title = (s_active_chat_index >= 0 && s_active_chat_index < s_chat_count) ? s_chat_entries[s_active_chat_index].title : "New chat";
-        GSize ts = graphics_text_layout_get_content_size(title, fonts_get_system_font(FONT_KEY_GOTHIC_14), GRect(0, 0, s_width, 20), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+        GFont shrink_title_font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
+        int shrink_title_h = 20;
+        if (s_font_size == 2) { shrink_title_font = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD); shrink_title_h = 28; }
+        else if (s_font_size == 1) { shrink_title_font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD); shrink_title_h = 24; }
+        GSize ts = graphics_text_layout_get_content_size(title, shrink_title_font, GRect(0, 0, s_width, shrink_title_h), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
         s_circle_target_x = (s_width - (28 + 5 + ts.w)) / 2 + 14;
       }
       start_anim();
@@ -881,6 +938,30 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     if (s_model_menu_layer) {
       menu_layer_reload_data(s_model_menu_layer);
     }
+  }
+
+  // 字体大小设置 (0=Normal, 1=Large, 2=Extra Large)
+  Tuple *font_size_t = dict_find(iter, MESSAGE_KEY_FONT_SIZE);
+  if (font_size_t) {
+    s_font_size = font_size_t->value->uint8;
+    if (s_font_size > 2) s_font_size = 0;
+    persist_write_int(PERSIST_KEY_FONT_SIZE, s_font_size);
+    apply_font_settings();
+  }
+
+  // 加粗设置 (0=不加粗, 1=加粗)
+  Tuple *font_bold_t = dict_find(iter, MESSAGE_KEY_FONT_BOLD);
+  if (font_bold_t) {
+    s_font_bold = font_bold_t->value->uint8 ? 1 : 0;
+    persist_write_int(PERSIST_KEY_FONT_BOLD, s_font_bold);
+    apply_font_settings();
+  }
+
+  // 禁用彩蛋设置 (0=启用, 1=禁用)
+  Tuple *disable_surprise_t = dict_find(iter, MESSAGE_KEY_DISABLE_SURPRISE);
+  if (disable_surprise_t) {
+    s_disable_surprise = disable_surprise_t->value->uint8 ? 1 : 0;
+    persist_write_int(PERSIST_KEY_DISABLE_SURPRISE, s_disable_surprise);
   }
 
   // 用户问题（切换对话时由 JS 发来的历史问题）
@@ -1064,8 +1145,12 @@ static void down_handler(ClickRecognizerRef r, void *ctx) {
   }
 }
 
-// DOWN 长按：彩蛋功能 —— 随机发送一个预设趣味问题给 AI
+// DOWN 长按：彩蛋功能 —— 随机发送一个预设趣味问题给 AI（可通过设置禁用）
 static void down_long_handler(ClickRecognizerRef r, void *ctx) {
+  if (s_disable_surprise) {
+    vibes_double_pulse();
+    return;
+  }
   if (s_state == STATE_SENDING || s_state == STATE_THINKING ||
       s_state == STATE_SHRINKING || s_state == STATE_EXPANDING) {
     vibes_double_pulse();
@@ -1178,8 +1263,13 @@ static void window_load(Window *window) {
   // 默认隐藏滚动层
   layer_set_hidden(scroll_layer_get_layer(s_scroll_layer), true);
 
-  // 初始化状态位
+  // 初始化状态位和字体设置
   bool ready = persist_exists(PERSIST_KEY_READY) ? persist_read_bool(PERSIST_KEY_READY) : false;
+  s_font_size = persist_exists(PERSIST_KEY_FONT_SIZE) ? (int)persist_read_int(PERSIST_KEY_FONT_SIZE) : 0;
+  if (s_font_size > 2) s_font_size = 0;
+  s_font_bold = persist_exists(PERSIST_KEY_FONT_BOLD) ? (int)persist_read_int(PERSIST_KEY_FONT_BOLD) : 0;
+  s_disable_surprise = persist_exists(PERSIST_KEY_DISABLE_SURPRISE) ? (int)persist_read_int(PERSIST_KEY_DISABLE_SURPRISE) : 0;
+  apply_font_settings();
   set_state(ready ? STATE_IDLE_READY : STATE_IDLE_NO_KEY);
 }
 

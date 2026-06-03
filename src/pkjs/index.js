@@ -220,6 +220,13 @@ function sendReadyStatus() {
   var apiKey = getSetting('api_key', '');
   var isReady = (apiKey && apiKey.trim().length > 0) ? 1 : 0;
   sendToWatch({ 'READY_STATUS': isReady });
+  // 同步显示设置给手表（合并在后续消息中避免额外蓝牙通讯）
+  setTimeout(function() {
+    var fontSize = parseInt(getSetting('font_size', '0'), 10);
+    var fontBold = parseInt(getSetting('font_bold', '0'), 10);
+    var disableSurprise = parseInt(getSetting('disable_surprise', '0'), 10);
+    sendToWatch({ 'FONT_SIZE': fontSize, 'FONT_BOLD': fontBold, 'DISABLE_SURPRISE': disableSurprise });
+  }, 200);
   setTimeout(sendChatList, 400);  // 稍长间隔确保 READY_STATUS 先到
   setTimeout(sendModelList, 800); // 再发模型列表
 }
@@ -595,6 +602,9 @@ Pebble.addEventListener('showConfiguration', function() {
     + '&chats=' + encodeURIComponent(JSON.stringify(chatMeta))
     + '&api_mode=' + encodeURIComponent(apiMode)
     + '&custom_api_url=' + encodeURIComponent(customApiUrl)
+    + '&font_size=' + encodeURIComponent(getSetting('font_size', '0'))
+    + '&font_bold=' + encodeURIComponent(getSetting('font_bold', '0'))
+    + '&disable_surprise=' + encodeURIComponent(getSetting('disable_surprise', '0'))
     + '#export_data=' + encodeURIComponent(JSON.stringify(safeDocs));
 
   Pebble.openURL(url);
@@ -635,6 +645,17 @@ Pebble.addEventListener('webviewclosed', function(e) {
     }
     if (settings.system_message && settings.system_message.trim().length > 0) {
       localStorage.setItem('system_message', settings.system_message.trim());
+    }
+
+    // 显示设置：字号、加粗、彩蛋开关
+    if (typeof settings.font_size !== 'undefined') {
+      localStorage.setItem('font_size', String(settings.font_size));
+    }
+    if (typeof settings.font_bold !== 'undefined') {
+      localStorage.setItem('font_bold', String(settings.font_bold));
+    }
+    if (typeof settings.disable_surprise !== 'undefined') {
+      localStorage.setItem('disable_surprise', String(settings.disable_surprise));
     }
 
     if (settings.switch_to) {
