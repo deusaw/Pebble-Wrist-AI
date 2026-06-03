@@ -78,6 +78,7 @@
     }
     .chat-btn-switch { background: #0047AB; }
     .chat-btn-delete { background: #441111; }
+    .chat-btn-export { background: #2a5a3a; }
     .empty { color: #556; font-size: 13px; text-align: center; padding: 20px; }
 
     /* 显示设置 */
@@ -376,9 +377,9 @@
           + '<div class="chat-meta">' + dateStr + ' · ' + msgCount + ' msgs' + (isActive ? ' · Active' : '') + (!hasDetails ? ' · No export data' : '') + '</div>'
           + '</div>'
           + '<div class="chat-actions">'
-          + (isActive ? '' : '<button class="chat-btn chat-btn-switch" data-id="' + c.id + '">Switch</button>')
-          + '<button class="chat-btn chat-btn-export" data-id="' + c.id + '">↓ JSON</button>'
-          + '<button class="chat-btn chat-btn-delete" data-id="' + c.id + '">Del</button>'
++ '<button class="chat-btn chat-btn-switch" data-id="' + c.id + '">Switch</button>')
+           + '<button class="chat-btn chat-btn-export" data-id="' + c.id + '">Export</button>'
+           + '<button class="chat-btn chat-btn-delete" data-id="' + c.id + '">Del</button>'
           + '</div></li>';
       }
       listEl.innerHTML = html;
