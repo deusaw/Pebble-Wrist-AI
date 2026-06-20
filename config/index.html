@@ -98,29 +98,39 @@
     .toggle-slider::before { content: ''; position: absolute; width: 18px; height: 18px; left: 3px; bottom: 3px; background: #fff; border-radius: 50%; transition: transform 0.2s; }
     .toggle-switch input:checked + .toggle-slider { background: #0047AB; }
     .toggle-switch input:checked + .toggle-slider::before { transform: translateX(20px); }
+    .beta-badge { display: inline-block; font-size: 10px; color: #fff; background: #666; padding: 1px 6px; border-radius: 4px; margin-left: 6px; vertical-align: middle; }
+    .beta-hint { font-size: 11px; color: #a60; margin-top: 4px; }
   </style>
 </head>
 <body>
   <h1>Wrist AI</h1>
 
-  <!-- API 设置 -->
-  <div class="field">
-    <label>API Provider</label>
-    <div class="mode-toggle">
-      <div class="mode-btn active" id="mode_openrouter" data-mode="openrouter">OpenRouter</div>
-      <div class="mode-btn" id="mode_custom" data-mode="custom">Custom API</div>
-    </div>
-    <div class="custom-url-field" id="custom_url_wrap">
-      <input type="url" id="custom_api_url" placeholder="https://api.example.com/v1/chat/completions">
-      <div class="hint">OpenAI-compatible endpoint (must accept /v1/chat/completions format)</div>
-    </div>
-  </div>
+<!-- API 设置 -->
+   <div class="field">
+     <label>API Provider</label>
+     <div class="mode-toggle">
+       <div class="mode-btn active" id="mode_openrouter" data-mode="openrouter">OpenRouter</div>
+       <div class="mode-btn" id="mode_custom" data-mode="custom">Custom API</div>
+     </div>
+     <div class="custom-url-field" id="custom_url_wrap">
+       <input type="url" id="custom_api_url" placeholder="https://api.example.com/v1/chat/completions">
+       <div class="hint">OpenAI-compatible endpoint (must accept /v1/chat/completions format)</div>
+     </div>
+   </div>
 
-  <div class="field">
-    <label>API Key</label>
-    <input type="password" id="api_key" placeholder="sk-or-v1-xxxx...">
-    <div class="status" id="key_status"></div>
-  </div>
+   <div class="field" id="api_key_wrap">
+     <label>API Key</label>
+     <input type="password" id="api_key" placeholder="sk-or-v1-xxxx...">
+     <div class="status" id="key_status"></div>
+   </div>
+
+   <div class="field" id="voice_wrap">
+     <label>Google Cloud TTS API Key <span class="beta-badge">Beta</span></label>
+     <input type="password" id="tts_api_key" placeholder="AIza...">
+     <div class="hint">Required for text-to-speech. Get a key from Google Cloud Console. Only works on Pebble Time 2 (Emery).</div>
+     <div class="beta-hint">⚠️ This feature requires the upcoming app update (v1.3.0). Not available in the current store version.</div>
+     <button class="btn btn-danger" id="delete_tts_key" style="margin-top:6px">Delete TTS Key</button>
+   </div>
 
   <!-- 模型列表管理 -->
   <div class="field">
@@ -165,9 +175,33 @@
       <label class="toggle-switch">
         <input type="checkbox" id="enable_surprise" checked>
         <span class="toggle-slider"></span>
-      </label>
+    </label>
     </div>
     <div class="hint">Long-press DOWN to send a random question</div>
+  </div>
+
+  <div class="field">
+    <div class="toggle-row">
+      <span class="toggle-label">Send Location to AI <span class="beta-badge">Beta</span></span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="location_enabled">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div class="hint">Include approximate GPS location in AI context</div>
+    <div class="beta-hint">⚠️ Requires upcoming app update (v1.3.0).</div>
+  </div>
+
+  <div class="field">
+    <div class="toggle-row">
+      <span class="toggle-label">Send Health Data to AI <span class="beta-badge">Beta</span></span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="health_enabled">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div class="hint">Include daily step count and active minutes in AI context</div>
+    <div class="beta-hint">⚠️ Requires upcoming app update (v1.3.0).</div>
   </div>
 
   <button class="btn btn-primary" id="save">Save Settings</button>
@@ -230,22 +264,28 @@
     var fontSize = getParam('font_size') || '0';
     var fontBold = getParam('font_bold') === '1';
     var disableSurprise = getParam('disable_surprise') === '1';
+    var locationEnabled = getParam('location_enabled') === '1';
+    var healthEnabled = getParam('health_enabled') === '1';
 
     function applyApiMode(mode) {
       apiMode = mode;
       var btnOR = document.getElementById('mode_openrouter');
       var btnCU = document.getElementById('mode_custom');
       var urlWrap = document.getElementById('custom_url_wrap');
+      var keyWrap = document.getElementById('api_key_wrap');
       var keyInput = document.getElementById('api_key');
+      btnOR.className = 'mode-btn';
+      btnCU.className = 'mode-btn';
+      urlWrap.style.display = 'none';
+      keyWrap.style.display = 'none';
       if (mode === 'custom') {
-        btnOR.className = 'mode-btn';
         btnCU.className = 'mode-btn active';
         urlWrap.style.display = 'block';
+        keyWrap.style.display = 'block';
         keyInput.placeholder = hasKey ? 'Leave blank to keep current' : 'Enter your API key';
       } else {
         btnOR.className = 'mode-btn active';
-        btnCU.className = 'mode-btn';
-        urlWrap.style.display = 'none';
+        keyWrap.style.display = 'block';
         keyInput.placeholder = hasKey ? 'Leave blank to keep current' : 'sk-or-v1-xxxx...';
       }
     }
@@ -280,6 +320,15 @@
     });
     document.getElementById('font_bold').checked = fontBold;
     document.getElementById('enable_surprise').checked = !disableSurprise;
+    document.getElementById('location_enabled').checked = locationEnabled;
+    document.getElementById('health_enabled').checked = healthEnabled;
+
+    // TTS key 状态
+    var hasTtsKey = getParam('has_tts_key') === '1';
+    var ttsKeyEl = document.getElementById('tts_api_key');
+    if (hasTtsKey) {
+      ttsKeyEl.placeholder = 'Key is set. Leave blank to keep.';
+    }
 
     // 填充设置
     document.getElementById('key_status').textContent =
@@ -397,10 +446,14 @@
         custom_api_url: document.getElementById('custom_api_url').value.trim(),
         font_size: parseInt(fontSize, 10),
         font_bold: document.getElementById('font_bold').checked ? 1 : 0,
-        disable_surprise: document.getElementById('enable_surprise').checked ? 0 : 1
+        disable_surprise: document.getElementById('enable_surprise').checked ? 0 : 1,
+        location_enabled: document.getElementById('location_enabled').checked ? 1 : 0,
+        health_enabled: document.getElementById('health_enabled').checked ? 1 : 0
       };
       var key = document.getElementById('api_key').value.trim();
       if (key.length > 0) s.api_key = key;
+      var ttsKey = document.getElementById('tts_api_key').value.trim();
+      if (ttsKey.length > 0) s.tts_api_key = ttsKey;
       // 附带页内累积的切换/删除操作
       if (activeId !== getParam('active_id')) s.switch_to = activeId;
       if (pendingDeletes.length > 0) s.deleted_chats = pendingDeletes;
@@ -496,6 +549,13 @@
     document.getElementById('delete_key').addEventListener('click', function() {
       if (confirm('Delete API key?')) {
         closeWith(buildSettings({ delete_key: true }));
+      }
+    });
+
+    // 删除 TTS Key
+    document.getElementById('delete_tts_key').addEventListener('click', function() {
+      if (confirm('Delete TTS API key?')) {
+        closeWith(buildSettings({ delete_tts_key: true }));
       }
     });
   </script>
