@@ -185,10 +185,11 @@ static int32_t s_active_minutes = 0;
 // 流控水位线（watch→JS 暂停/恢复）。
 // raw PCM 8000 B/s 消费，蓝牙投递 ~46k B/s（processAmQueue 15ms 串行）。
 // JS 全速投递，靠 watch PAUSE/RESUME 控水位。
-// HIGH + 在途（~9800B）≤ RING_SIZE。LOW 留足蓝牙抖动跑道。
-// LOW=12000（1.5s 跑道）足以覆盖蓝牙信号波动期间的消费。
+// HIGH + 在途（~9800B）≤ RING_SIZE。
+// LOW=14000（1.75s 跑道）：蓝牙丢包 1.75s 内缓冲不会见底（8000×1.75=14000）。
+// HIGH-LOW=8000B=1s 消费周期，PAUSE/RESUME 频率适中。
 #define TTS_PAUSE_HIGH       22000  // 缓冲≥此值 → 发 TTS_PAUSE
-#define TTS_RESUME_LOW       12000  // 缓冲≤此值 → 发 TTS_RESUME（1.5s 播放跑道防 underrun）
+#define TTS_RESUME_LOW       14000  // 缓冲≤此值 → 发 TTS_RESUME（1.75s 播放跑道防 underrun）
 
 static uint8_t s_tts_ring[TTS_RING_SIZE];
 static uint32_t s_tts_head = 0;
@@ -1628,9 +1629,9 @@ static void up_handler(ClickRecognizerRef r, void *ctx) {
 // UP 长按：始终打开菜单
 static void up_long_handler(ClickRecognizerRef r, void *ctx) {
 #if defined(PBL_PLATFORM_EMERY)
-  // 播放 TTS 时长按 UP 增加音量
+  // 播放 TTS 时长按 UP 增加音量（步长 10，0→10→20...→100 共 11 档）
   if (s_tts_playing) {
-    s_tts_volume += 20;
+    s_tts_volume += 10;
     if (s_tts_volume > 100) s_tts_volume = 100;
     persist_write_int(PERSIST_KEY_TTS_VOLUME, s_tts_volume);
     vibes_short_pulse();
@@ -1656,9 +1657,9 @@ static void down_handler(ClickRecognizerRef r, void *ctx) {
 // DOWN 长按：Emery 上朗读/调节音量 / 其他平台彩蛋功能
 static void down_long_handler(ClickRecognizerRef r, void *ctx) {
 #if defined(PBL_PLATFORM_EMERY)
-  // 正在播放 TTS → 减小音量
+  // 正在播放 TTS → 减小音量（步长 10，100→90→80...→10→0 共 11 档）
   if (s_tts_playing) {
-    s_tts_volume -= 20;
+    s_tts_volume -= 10;
     if (s_tts_volume < 0) s_tts_volume = 0;
     persist_write_int(PERSIST_KEY_TTS_VOLUME, s_tts_volume);
     vibes_short_pulse();
