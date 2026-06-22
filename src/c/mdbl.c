@@ -71,6 +71,14 @@ static const GColor s_palette[] = {
 #define CIRCLE_R_SMALL  14
 #define CIRCLE_Y_SMALL  PBL_IF_ROUND_ELSE(28, 20)
 
+// Emery 平台有扬声器，回复页面标题下方加一行 "Long Press Down to TTS" 操作提示，
+// 需要把滚动内容区下移让出空间。非 Emery 平台无 TTS，偏移为 0。
+#if defined(PBL_PLATFORM_EMERY)
+  #define TTS_HINT_OFFSET   14   // Emery: 标题下 TTS 提示占用的高度
+#else
+  #define TTS_HINT_OFFSET   0
+#endif
+
 // 动态布局（从屏幕尺寸计算）
 static int s_circle_r_big;
 static int s_circle_y_big;
@@ -241,7 +249,7 @@ static void update_response_text(void) {
     GSize text_size = text_layer_get_content_size(s_reply_layer);
     GSize q_size = text_layer_get_content_size(s_question_display_layer);
     int content_h = q_size.h + 12 + text_size.h + 20;
-    int scroll_top = CIRCLE_Y_SMALL + CIRCLE_R_SMALL + 10;
+    int scroll_top = CIRCLE_Y_SMALL + CIRCLE_R_SMALL + 10 + TTS_HINT_OFFSET;
     int scroll_h = s_height - scroll_top;
     if (content_h < scroll_h) content_h = scroll_h;
     scroll_layer_set_content_size(s_scroll_layer, GSize(s_width, content_h));
@@ -323,7 +331,7 @@ static void tts_cancel_remote(void);  // 前向声明：看门狗在定义之前
 // TTS 看门狗：防止 TTS_DONE/STATUS 被蓝牙丢弃导致 playing/loading 永久卡死
 static void tts_watchdog_callback(void *data) {
   s_tts_watchdog_timer = NULL;
-  if (s_tts_playing) {
+  if (s_tts_playing || s_tts_loading) {
     APP_LOG(APP_LOG_LEVEL_WARNING, "TTS watchdog timeout");
     tts_stop();
     tts_cancel_remote();  // 通知 JS 停止发送
@@ -469,6 +477,8 @@ static void tts_stop(void) {
   // 注意：不发 TTS_CANCEL。tts_stop 只清本地状态。
   // 需要通知 JS 停止发送时由调用方调 tts_cancel_remote()，
   // 避免 tts_request 里 tts_stop 占用 outbox 导致 TTS_REQUEST 发送失败。
+  // 重绘 canvas：标题区可能从 "Reading..." 恢复，TTS 提示需重新显示。
+  layer_mark_dirty(s_canvas_layer);
 }
 
 // 通知 JS 取消 TTS：停止 fetch/send 并清空 amQueue 里的 TTS chunk。
@@ -895,6 +905,18 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
       // 分隔线
       graphics_context_set_fill_color(ctx, GColorLightGray);
       graphics_fill_rect(ctx, GRect(s_width / 4, CIRCLE_Y_SMALL + CIRCLE_R_SMALL + 6, s_width / 2, 1), 0, GCornerNone);
+#if defined(PBL_PLATFORM_EMERY)
+      // TTS 操作提示：标题分隔线下方，最小字号显示。
+      // 朗读中（s_tts_playing 或 s_tts_loading）时隐藏提示（标题已变 "Reading..."，且此时提示无意义）。
+      if (!s_tts_playing && !s_tts_loading) {
+        GFont hint_font = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+        const char *hint = "Long Press Down to TTS";
+        GSize hint_size = graphics_text_layout_get_content_size(hint, hint_font, GRect(0, 0, s_width, 14), GTextOverflowModeWordWrap, GTextAlignmentCenter);
+        graphics_context_set_text_color(ctx, GColorLightGray);
+        GRect hint_box = GRect((s_width - hint_size.w) / 2, CIRCLE_Y_SMALL + CIRCLE_R_SMALL + 8, hint_size.w, 14);
+        graphics_draw_text(ctx, hint, hint_font, hint_box, GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+      }
+#endif
       break;
     }
     default:
@@ -1146,7 +1168,7 @@ static void set_state(AppState new_state) {
       text_layer_set_text_color(s_question_display_layer, GColorDarkGray);
       text_layer_set_text(s_question_display_layer, s_question_display);
       {
-        int scroll_top = CIRCLE_Y_SMALL + CIRCLE_R_SMALL + 10;
+        int scroll_top = CIRCLE_Y_SMALL + CIRCLE_R_SMALL + 10 + TTS_HINT_OFFSET;
         GSize q_size = text_layer_get_content_size(s_question_display_layer);
         int reply_y = q_size.h + 12;
         layer_set_frame(text_layer_get_layer(s_reply_layer), GRect(8, reply_y, s_width - 16, 2000));
@@ -1332,7 +1354,9 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   if (status_t && !reply_t && !reply_chunk_t) {
 #if defined(PBL_PLATFORM_EMERY)
     // TTS 失败回传的 STATUS：清理 TTS 状态，不污染回复内容
-    if (s_tts_playing) {
+    // 检查 s_tts_playing 或 s_tts_loading：加载阶段（等首个 chunk）也可能收到错误 STATUS，
+    // 此时 s_tts_playing=true 但 s_tts_loading 也=true；用 OR 确保两种情况都清理。
+    if (s_tts_playing || s_tts_loading) {
       tts_stop();
       return;
     }
@@ -1432,7 +1456,7 @@ static void outbox_failed(DictionaryIterator *iter, AppMessageResult reason, voi
   // TTS_REQUEST 异步发送失败：清理 TTS 状态，防止 s_tts_playing 卡死导致按钮瘫痪。
   // 利用 s_tts_playing 与问答 SENDING 状态互斥区分消息类型（TTS_REQUEST 发出时
   // s_tts_playing=true，问答 SENDING 状态下 s_tts_playing=false），无需读 iter。
-  if (s_tts_playing) {
+  if (s_tts_playing || s_tts_loading) {
     tts_stop();
     tts_cancel_remote();  // 通知 JS 停止发送残余 chunk
     vibes_double_pulse();
@@ -1670,8 +1694,8 @@ static void window_load(Window *window) {
   layer_set_update_proc(s_canvas_layer, canvas_draw);
   layer_add_child(root, s_canvas_layer);
 
-  // Scroll 层 (回复显示区)
-  int scroll_top = CIRCLE_Y_SMALL + CIRCLE_R_SMALL + (PBL_IF_ROUND_ELSE(12, 8));
+  // Scroll 层 (回复显示区) — Emery 下移 TTS_HINT_OFFSET 给标题区 TTS 提示留空间
+  int scroll_top = CIRCLE_Y_SMALL + CIRCLE_R_SMALL + (PBL_IF_ROUND_ELSE(12, 8)) + TTS_HINT_OFFSET;
   s_scroll_layer = scroll_layer_create(GRect(0, scroll_top, s_width, s_height - scroll_top));
   scroll_layer_set_click_config_onto_window(s_scroll_layer, window);
   // 恢复窗口基础点击（覆盖 ScrollLayer 的默认行为以便响应 UP/DOWN）
@@ -1864,8 +1888,8 @@ static void delayed_pop_timer(void *data) {
 
 static void menu_select_click(MenuLayer *menu, MenuIndex *idx, void *ctx) {
 #if defined(PBL_PLATFORM_EMERY)
-  // 切换对话前停止 TTS（防止旧回复音频继续播放）
-  if (s_tts_playing) {
+  // 切换对话前停止 TTS（防止旧回复音频继续播放，含加载阶段）
+  if (s_tts_playing || s_tts_loading) {
     tts_stop();
     tts_cancel_remote();  // 通知 JS 停止发送旧回复的 chunk
   }
