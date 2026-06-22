@@ -489,6 +489,31 @@ function askAI(question, contextText, onFinish) {
 // 语言自动检测：回复含中文字符即用 cmn-CN 语音，否则用 en-US。
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// Base64 解码：PebbleKit JS 无 atob，自行实现。
+// 返回二进制字符串（每个字符 0-255），与 atob 行为一致，供 charCodeAt 逐字节读取。
+var B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+function atobLocal(b64) {
+  // 去除 padding 和空白
+  b64 = b64.replace(/[^A-Za-z0-9+/]/g, '');
+  var bytes = [];
+  for (var i = 0; i < b64.length; i += 4) {
+    var c0 = B64.indexOf(b64.charAt(i));
+    var c1 = B64.indexOf(b64.charAt(i + 1));
+    var c2 = B64.indexOf(b64.charAt(i + 2));
+    var c3 = B64.indexOf(b64.charAt(i + 3));
+    var n = (c0 << 18) | (c1 << 12) | (c2 << 6) | c3;
+    bytes.push((n >> 16) & 0xFF);
+    if (c2 >= 0) bytes.push((n >> 8) & 0xFF);
+    if (c3 >= 0) bytes.push(n & 0xFF);
+  }
+  // 转成二进制字符串
+  var str = '';
+  for (var j = 0; j < bytes.length; j++) {
+    str += String.fromCharCode(bytes[j]);
+  }
+  return str;
+}
+
 // IMA ADPCM 编码表（公开规范）
 var adpcmStepTable = [7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,337,371,408,449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,27086,29794,32767];
 var adpcmIndexTable = [-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8];
@@ -659,7 +684,7 @@ function ttsFetchNext(ttsApiKey, sessionId) {
       try {
         var data = JSON.parse(xhr.responseText);
         if (data.audioContent) {
-          var decoded = atob(data.audioContent);
+          var decoded = atobLocal(data.audioContent);
           var pcm16 = [];
           // 跳过 WAV 头（44 字节）
           for (var i = 44; i < decoded.length; i += 2) {
