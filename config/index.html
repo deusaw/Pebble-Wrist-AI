@@ -194,6 +194,18 @@
 
   <div class="field">
     <div class="toggle-row">
+      <span class="toggle-label">Web Search <span class="beta-badge">Beta</span></span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="web_search_enabled">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div class="hint">Let models search the web for current information (OpenRouter only). May increase reply latency.</div>
+    <div class="beta-hint">⚠️ Requires upcoming app update (v1.3.0).</div>
+  </div>
+
+  <div class="field">
+    <div class="toggle-row">
       <span class="toggle-label">Send Health Data to AI <span class="beta-badge">Beta</span></span>
       <label class="toggle-switch">
         <input type="checkbox" id="health_enabled">
@@ -277,6 +289,7 @@
     var fontBold = getParam('font_bold') === '1';
     var disableSurprise = getParam('disable_surprise') === '1';
     var locationEnabled = getParam('location_enabled') === '1';
+    var webSearchEnabled = (getParam('web_search_enabled') || '1') === '1';
     var healthEnabled = getParam('health_enabled') === '1';
     var autoTts = getParam('auto_tts') === '1';
 
@@ -334,6 +347,7 @@
     document.getElementById('font_bold').checked = fontBold;
     document.getElementById('enable_surprise').checked = !disableSurprise;
     document.getElementById('location_enabled').checked = locationEnabled;
+    document.getElementById('web_search_enabled').checked = webSearchEnabled;
     document.getElementById('health_enabled').checked = healthEnabled;
     document.getElementById('auto_tts').checked = autoTts;
 
@@ -462,6 +476,7 @@
         font_bold: document.getElementById('font_bold').checked ? 1 : 0,
         disable_surprise: document.getElementById('enable_surprise').checked ? 0 : 1,
         location_enabled: document.getElementById('location_enabled').checked ? 1 : 0,
+        web_search_enabled: document.getElementById('web_search_enabled').checked ? 1 : 0,
         health_enabled: document.getElementById('health_enabled').checked ? 1 : 0,
         auto_tts: document.getElementById('auto_tts').checked ? 1 : 0
       };
