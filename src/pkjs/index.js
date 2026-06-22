@@ -932,11 +932,42 @@ Pebble.addEventListener('appmessage', function(e) {
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         function success(pos) {
-          var lat = pos.coords.latitude.toFixed(2);
-        var lng = pos.coords.longitude.toFixed(2);
-          if (contextText) contextText += '\n';
-          contextText += '- Approx location: ' + lat + ', ' + lng;
-          callAskAI(question, contextText, MAX_WATCH_CHARS);
+          var lat = pos.coords.latitude;
+          var lng = pos.coords.longitude;
+          // 反向地理编码：坐标 → 城市名（免费 API，无需 key，CORS 友好）
+          var geoXhr = new XMLHttpRequest();
+          var geoUrl = 'https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=' +
+            lat + '&longitude=' + lng + '&localityLanguage=zh';
+          geoXhr.open('GET', geoUrl, true);
+          geoXhr.timeout = 3000;
+          geoXhr.onload = function() {
+            var locStr = lat.toFixed(2) + ', ' + lng.toFixed(2);  // 回退：裸坐标
+            try {
+              var geo = JSON.parse(geoXhr.responseText);
+              var parts = [];
+              if (geo.city) parts.push(geo.city);
+              else if (geo.locality) parts.push(geo.locality);
+              if (geo.principalSubdivision) parts.push(geo.principalSubdivision);
+              if (geo.countryName) parts.push(geo.countryName);
+              if (parts.length > 0) locStr = parts.join(', ');
+            } catch (e) {}
+            if (contextText) contextText += '\n';
+            contextText += '- Approx location: ' + locStr;
+            callAskAI(question, contextText, MAX_WATCH_CHARS);
+          };
+          geoXhr.onerror = function() {
+            // 反查失败，回退到裸坐标
+            if (contextText) contextText += '\n';
+            contextText += '- Approx location: ' + lat.toFixed(2) + ', ' + lng.toFixed(2);
+            callAskAI(question, contextText, MAX_WATCH_CHARS);
+          };
+          geoXhr.ontimeout = function() {
+            // 超时，回退到裸坐标
+            if (contextText) contextText += '\n';
+            contextText += '- Approx location: ' + lat.toFixed(2) + ', ' + lng.toFixed(2);
+            callAskAI(question, contextText, MAX_WATCH_CHARS);
+          };
+          geoXhr.send();
         },
         function error() {
         // 定位失败（用户拒绝/超时），不带定位继续
