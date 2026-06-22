@@ -512,21 +512,17 @@ function atobLocal(b64) {
   return str;
 }
 
-// 16bit PCM → 8bit PCM（取高 8 位，带 1-LSB 抖动消除截断失真）。
+// 16bit PCM → 8bit PCM（取高 8 位）。
 // Google TTS 返回 LINEAR16（16-bit 小端），扬声器要 8-bit。
-// 直接 >>8 截断会引入谐波失真（尤其在低音量段落，量化误差与信号相关），
-// 加 ±1 LSB 抖动把量化噪声"白化"成更不易察觉的背景嘶嘶声，吐词更清晰。
+// 纯 >>8 截断：8bit 量化底噪是宽频白噪声（~50dB SNR），不刺耳。
+// 注：曾尝试加 ±1 LSB 交替抖动"白化"量化噪声，但对静音段会输出 +1,-1,+1,-1...
+// 即 4000Hz 近满幅方波（刺耳蜂鸣），确定性抖动在 Fs/2 必然产生音调，已移除。
+// 若后续需要抖动，须用 Math.random() 生成真随机 TPDF 噪声。
 // 字节格式：输出 unsigned 0..255，手表端 (int8_t) 强转回有符号（标准二进制补码往返）。
 function pcm16ToPcm8(pcm16) {
   var pcm8 = [];
-  var ditherToggle = false;
   for (var i = 0; i < pcm16.length; i++) {
-    // 双电平抖动（±1 LSB）：奇偶样本分别加 +1/-1 LSB（16bit 域 = ±256）
-    ditherToggle = !ditherToggle;
-    var dithered = pcm16[i] + (ditherToggle ? 256 : -256);
-    if (dithered > 32767) dithered = 32767;
-    if (dithered < -32768) dithered = -32768;
-    pcm8.push((dithered >> 8) & 0xFF);  // 取高 8 位为 unsigned 0..255
+    pcm8.push((pcm16[i] >> 8) & 0xFF);  // 取高 8 位为 unsigned 0..255
   }
   return pcm8;
 }

@@ -171,15 +171,17 @@ static int32_t s_active_minutes = 0;
 #define TTS_RING_SIZE        16384  // 环形缓冲区（Emery RAM 充足）
 #define TTS_DECODE_BYTES     1600   // 每次播放的 PCM 字节数 = 200ms × 8000B/s（raw 8bit/8kHz）
 #define TTS_PLAYBACK_MS      200    // 播放定时器间隔（与 DECODE_BYTES 严格匹配：1600B/200ms=8000B/s）
-#define TTS_START_THRESHOLD  3000   // 缓冲达到此字节数后开始播放（~0.375s 预缓冲）
+#define TTS_START_THRESHOLD  6000   // 缓冲达到此字节数后开始播放（0.75s 预缓冲，raw PCM 8000B/s）
 #define TTS_CLOSE_DELAY_MS   1500   // 句间延迟关闭扬声器
 #define TTS_WATCHDOG_MS      30000  // TTS 看门狗：30s 无任何 chunk/done 则超时清理
 // 流控水位线（watch→JS 暂停/恢复）。
 // 蓝牙到达速度（~700B/15-30ms ≈ 23k+ B/s）远超手表消费（8000B/s raw PCM），
 // 长文本开播后缓冲会快速填满，到 HIGH 通知 JS 暂停、到 LOW 通知 JS 恢复。
-// HIGH/LOW 之差需大于蓝牙往返期间在途数据量（受 amQueue watermark=3 约束，在途 ≤ ~2100B）。
+// LOW 必须留足"RESUME 往返期间"的播放跑道：8000B/s 消费，LOW=8000 → 1 秒跑道，
+// 足以覆盖 RESUME 发出→JS 响应→chunk 到达的 RTT（~200-500ms）。
+// HIGH-LOW 之差需大于在途数据量（amQueue watermark=3 约束在途 ≤ ~2800B）。
 #define TTS_PAUSE_HIGH       12000  // 缓冲≥此值 → 发 TTS_PAUSE（留 4384B 余量到溢出，吸收在途 chunk）
-#define TTS_RESUME_LOW       4000   // 缓冲≤此值 → 发 TTS_RESUME（留 0.5s 播放余量防 underrun）
+#define TTS_RESUME_LOW       8000   // 缓冲≤此值 → 发 TTS_RESUME（1s 播放跑道防 underrun）
 
 static uint8_t s_tts_ring[TTS_RING_SIZE];
 static uint32_t s_tts_head = 0;
