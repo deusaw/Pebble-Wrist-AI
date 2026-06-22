@@ -173,9 +173,9 @@ static int32_t s_active_minutes = 0;
 // ── TTS 语音播放（仅 Emery 平台有扬声器）──────────────────────────
 #if defined(PBL_PLATFORM_EMERY)
 #define TTS_RING_SIZE        16384  // 环形缓冲区（Emery RAM 充足）
-#define TTS_DECODE_BYTES     400    // 每次解码的 ADPCM 字节数（400B=800样本=100ms 音频）
-#define TTS_PLAYBACK_MS      100    // 播放定时器间隔（100ms 匹配解码量）
-#define TTS_START_THRESHOLD  2000   // 缓冲达到此字节数后开始播放
+#define TTS_DECODE_BYTES     800    // 每次解码的 ADPCM 字节数
+#define TTS_PLAYBACK_MS      200    // 播放定时器间隔
+#define TTS_START_THRESHOLD  3000   // 缓冲达到此字节数后开始播放
 #define TTS_CLOSE_DELAY_MS   1500   // 句间延迟关闭扬声器
 #define TTS_WATCHDOG_MS      30000  // TTS 看门狗：30s 无任何 chunk/done 则超时清理
 
@@ -418,7 +418,6 @@ static void tts_playback_timer_callback(void *data) {
 
   int decode_count = (s_tts_count >= TTS_DECODE_BYTES) ? TTS_DECODE_BYTES : s_tts_count;
   if (decode_count > 0) {
-    // 先解码到 s_out_buf
     for (int i = 0; i < decode_count; i++) {
       uint8_t b = s_tts_ring[s_tts_head];
       s_tts_head = (s_tts_head + 1) % TTS_RING_SIZE;
@@ -428,21 +427,7 @@ static void tts_playback_timer_callback(void *data) {
       s_out_buf[i * 2]     = tts_decode_nibble(n1);
       s_out_buf[i * 2 + 1] = tts_decode_nibble(n2);
     }
-    // speaker_stream_write 返回实际接受的字节数，可能少于请求（队列满时）。
-    // 检查返回值：未接受的 PCM 数据对应的 ADPCM 字节退回环形缓冲。
-    int pcm_total = decode_count * 2;
-    uint32_t written = speaker_stream_write((uint8_t *)s_out_buf, pcm_total);
-    if (written < (uint32_t)pcm_total) {
-      // 部分写入：未写入的 PCM 对应的 ADPCM 字节退回环形缓冲
-      int accepted_samples = written / 2;       // 每个 PCM 样本 1 字节（8bit）
-      int rejected_adpcm = decode_count - (accepted_samples / 2);  // 每 ADPCM 字节 = 2 样本
-      if (rejected_adpcm > 0) {
-        s_tts_head = (s_tts_head - rejected_adpcm + TTS_RING_SIZE) % TTS_RING_SIZE;
-        s_tts_count += rejected_adpcm;
-        // ADPCM 解码状态需要回退——但 valpred/index 无法精确回退。
-        // 实践中少量退回（几十字节）的失真可接受，下次解码会快速收敛。
-      }
-    }
+    speaker_stream_write((uint8_t *)s_out_buf, decode_count * 2);
     s_tts_playback_timer = app_timer_register(TTS_PLAYBACK_MS, tts_playback_timer_callback, NULL);
   } else {
     // 缓冲空，安排延迟关闭

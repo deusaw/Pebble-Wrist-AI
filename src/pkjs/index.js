@@ -751,8 +751,8 @@ function ttsFetchNext(ttsApiKey, sessionId) {
 // LOOP 2：从音频队列取 ADPCM 数据 → 分块入 amQueue 串行发送
 // 背压：逐 chunk 控制，每次只 push 一个 700B chunk，检查 amQueue 水位后重新调度。
 // 避免一次性把整句（可能数十 KB）灌入 amQueue → 手表 16KB 环形缓冲溢出 → ADPCM 失步后半段变噪声。
-var TTS_AMQUEUE_WATERMARK = 8;   // amQueue 里待发 TTS chunk 上限
-var TTS_CHUNK_SIZE = 200;        // 小 chunk 避免超 AppMessage 单条限制，提高蓝牙吞吐
+var TTS_AMQUEUE_WATERMARK = 3;   // amQueue 里待发 TTS chunk 上限（保守，确保不溢出 16KB 缓冲）
+var TTS_CHUNK_SIZE = 700;        // 恢复初版能工作的 chunk size
 var ttsCurrentSentence = null;   // 正在分块发送的句子（字节组）
 var ttsCurrentOffset = 0;        // 当前句子已发送到的字节偏移
 
