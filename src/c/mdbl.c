@@ -179,7 +179,7 @@ static int32_t s_active_minutes = 0;
 #define TTS_RING_SIZE        32768  // 环形缓冲区（Emery RAM 充足，32KB 给 raw PCM 留足溢出余量）
 #define TTS_DECODE_BYTES     1600   // 每次播放的 PCM 字节数 = 200ms × 8000B/s（raw 8bit/8kHz）
 #define TTS_PLAYBACK_MS      200    // 播放定时器间隔（与 DECODE_BYTES 严格匹配：1600B/200ms=8000B/s）
-#define TTS_START_THRESHOLD  16000  // 开播预缓冲（2s 音频 @ 8000B/s）：蓝牙信号弱时大缓冲防 underrun
+#define TTS_START_THRESHOLD  10000  // 开播预缓冲（1.25s 音频 @ 8000B/s）：蓝牙弱时大缓冲防 underrun，须 < LOW
 #define TTS_CLOSE_DELAY_MS   1500   // 句间延迟关闭扬声器
 #define TTS_WATCHDOG_MS      30000  // TTS 看门狗：30s 无任何 chunk/done 则超时清理
 // 流控水位线（watch→JS 暂停/恢复）。
@@ -960,22 +960,18 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
   }
 
 #if defined(PBL_PLATFORM_EMERY)
-  // 音量指示器叠加层：调节音量后显示 2 秒，居中黑底白字
+  // 音量指示器：调节音量后标题区临时显示 "Vol: NN%" 2 秒。
+  // 画在 canvas 标题区（scroll layer 上方露出的区域），避免被 scroll 内容遮挡。
   if (s_tts_vol_timer && s_tts_playing) {
     static char vol_buf[16];
     snprintf(vol_buf, sizeof(vol_buf), "Vol: %d%%", s_tts_volume);
     GFont vol_font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
     GSize vol_size = graphics_text_layout_get_content_size(vol_buf, vol_font, GRect(0, 0, s_width, 24), GTextOverflowModeWordWrap, GTextAlignmentCenter);
-    int box_w = vol_size.w + 20;
-    int box_h = 28;
-    int box_x = (s_width - box_w) / 2;
-    int box_y = (s_height - box_h) / 2;
-    // 黑底圆角矩形
-    graphics_context_set_fill_color(ctx, GColorBlack);
-    graphics_fill_rect(ctx, GRect(box_x, box_y, box_w, box_h), 4, GCornersAll);
-    // 白字
-    graphics_context_set_text_color(ctx, GColorWhite);
-    graphics_draw_text(ctx, vol_buf, vol_font, GRect(box_x, box_y + 2, box_w, box_h - 4), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+    // 标题区白底黑字覆盖（与标题同位置，替换标题）
+    graphics_context_set_fill_color(ctx, GColorWhite);
+    graphics_fill_rect(ctx, GRect(0, CIRCLE_Y_SMALL - CIRCLE_R_SMALL, s_width, CIRCLE_R_SMALL * 2 + 4), 0, GCornerNone);
+    graphics_context_set_text_color(ctx, GColorBlack);
+    graphics_draw_text(ctx, vol_buf, vol_font, GRect(0, CIRCLE_Y_SMALL - 12, s_width, 24), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
   }
 #endif
 }
