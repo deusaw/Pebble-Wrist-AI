@@ -15,7 +15,7 @@
 var MAX_MESSAGES_PER_CHAT = 20; // 每个对话最多保留的消息条数（防 localStorage 过大）
 var MAX_CHATS = 20;             // 对话槽位上限（超出时淘汰最旧的）
 var MAX_WATCH_CHATS = 20;       // 手表端菜单最多显示的历史对话数
-var MAX_CONFIG_CHATS = 8;       // 配置页面传送的对话数（URL + Hash 有长度限制）
+var MAX_CONFIG_CHATS = 20;      // 配置页面传送的对话数（与手表菜单一致，元数据精简可承受 URL 长度）
 
 // 默认 System Prompt：强制简洁回复、禁止 Markdown，适应手表小屏幕
 var DEFAULT_PROMPT = "You are Pebble Wrist AI, a concise assistant on a Pebble smartwatch. Rules: 1) Reply ONLY with the final answer, no reasoning or thinking process. 2) Keep responses under 400 words in English, or under 400 Chinese characters. 3) No markdown, no bullet lists. 4) Use plain sentences only.";
