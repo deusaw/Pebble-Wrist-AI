@@ -1,13 +1,13 @@
 {
   "name": "pebble-wrist-ai",
   "author": "deusaw",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "keywords": ["pebble-app"],
   "private": true,
   "dependencies": {},
   "pebble": {
     "displayName": "Wrist AI",
-    "uuid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "uuid": "1c4a7728-ee62-431f-a941-e40fafab98af",
     "sdkVersion": "3",
     "enableMultiJS": false,
     "targetPlatforms": [
@@ -19,7 +19,7 @@
     "watchapp": {
       "watchface": false
     },
-    "capabilities": ["configurable", "voice"],
+    "capabilities": ["configurable", "voice", "health"],
     "messageKeys": [
       "QUESTION",
       "REPLY",
@@ -35,7 +35,19 @@
       "SWITCH_MODEL",
       "FONT_SIZE",
       "FONT_BOLD",
-      "DISABLE_SURPRISE"
+      "DISABLE_SURPRISE",
+      "STEP_COUNT",
+      "ACTIVE_MINUTES",
+      "HEALTH_ENABLED",
+      "AUTO_TTS",
+      "HAS_TTS_KEY",
+      "WEB_SEARCH_ENABLED",
+      "SWITCH_WEB_SEARCH",
+      "TTS_REQUEST",
+      "TTS_CHUNK",
+      "TTS_END",
+      "TTS_DONE",
+      "TTS_CANCEL"
     ],
     "resources": {
       "media": [

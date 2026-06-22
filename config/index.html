@@ -128,7 +128,7 @@
      <label>Google Cloud TTS API Key <span class="beta-badge">Beta</span></label>
      <input type="password" id="tts_api_key" placeholder="AIza...">
      <div class="hint">Required for text-to-speech. Get a key from Google Cloud Console. Only works on Pebble Time 2 (Emery).</div>
-     <div class="beta-hint">⚠️ This feature requires the upcoming app update (v1.3.0). Not available in the current store version.</div>
+     <div class="beta-hint">⚠️ This feature is part of v1.3.0 (beta).</div>
      <button class="btn btn-danger" id="delete_tts_key" style="margin-top:6px">Delete TTS Key</button>
    </div>
 
@@ -188,8 +188,8 @@
         <span class="toggle-slider"></span>
       </label>
     </div>
-    <div class="hint">Include approximate GPS location in AI context</div>
-    <div class="beta-hint">⚠️ Requires upcoming app update (v1.3.0).</div>
+    <div class="hint">Include approximate GPS location in AI context. Sent to your AI provider with each question when enabled.</div>
+    <div class="beta-hint">⚠️ This feature is part of v1.3.0 (beta).</div>
   </div>
 
   <div class="field">
@@ -200,8 +200,8 @@
         <span class="toggle-slider"></span>
       </label>
     </div>
-    <div class="hint">Let models search the web for current information (OpenRouter only). May increase reply latency.</div>
-    <div class="beta-hint">⚠️ Requires upcoming app update (v1.3.0).</div>
+    <div class="hint">Let models search the web for current information (OpenRouter only). May increase reply latency. Some models may not support it — if you get an error, turn this off or switch models.</div>
+    <div class="beta-hint">⚠️ This feature is part of v1.3.0 (beta).</div>
   </div>
 
   <div class="field">
@@ -212,8 +212,8 @@
         <span class="toggle-slider"></span>
       </label>
     </div>
-    <div class="hint">Include daily step count and active minutes in AI context</div>
-    <div class="beta-hint">⚠️ Requires upcoming app update (v1.3.0).</div>
+    <div class="hint">Include daily step count and active minutes in AI context. Sent to your AI provider with each question when enabled (including custom endpoints).</div>
+    <div class="beta-hint">⚠️ This feature is part of v1.3.0 (beta).</div>
   </div>
 
   <div class="field">
@@ -224,8 +224,8 @@
         <span class="toggle-slider"></span>
       </label>
     </div>
-    <div class="hint">Automatically read AI replies aloud when they arrive (Emery only)</div>
-    <div class="beta-hint">⚠️ Requires upcoming app update (v1.3.0).</div>
+    <div class="hint">Automatically read AI replies aloud when they arrive (Emery only). Requires a Google TTS key above.</div>
+    <div class="beta-hint">⚠️ This feature is part of v1.3.0 (beta).</div>
   </div>
 
   <button class="btn btn-primary" id="save">Save Settings</button>

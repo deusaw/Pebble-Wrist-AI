@@ -144,7 +144,7 @@ function getApiEndpoint() {
 }
 
 function isOpenRouter() {
-  return getSetting('api_mode', 'openrouter') === 'openrouter';
+  return getSetting('api_mode', 'openrouter') !== 'custom';
 }
 
 // 全局自增会话ID：每次新请求 +1，旧请求的回调通过比对此值判断是否已过期
@@ -158,8 +158,10 @@ var amSending = false;
 function processAmQueue() {
   if (amSending || amQueue.length === 0) return;
   amSending = true;
-  
+
   var item = amQueue[0];
+  // TTS 音频包丢一个就毁后半句（ADPCM 状态连续），给更多重试机会
+  var maxRetries = (typeof item.payload['TTS_CHUNK'] !== 'undefined') ? 8 : 3;
   Pebble.sendAppMessage(
     item.payload,
     function() {
@@ -170,7 +172,7 @@ function processAmQueue() {
     function(e) {
       console.log('sendToWatch fail: ' + JSON.stringify(e));
       item.retries++;
-      if (item.retries < 3) {
+      if (item.retries < maxRetries) {
         setTimeout(function() { amSending = false; processAmQueue(); }, 500);
       } else {
         amQueue.shift();
@@ -225,7 +227,12 @@ function sendReadyStatus() {
     var fontSize = parseInt(getSetting('font_size', '0'), 10);
     var fontBold = parseInt(getSetting('font_bold', '0'), 10);
     var disableSurprise = parseInt(getSetting('disable_surprise', '0'), 10);
-    sendToWatch({ 'FONT_SIZE': fontSize, 'FONT_BOLD': fontBold, 'DISABLE_SURPRISE': disableSurprise });
+    var healthEnabled = parseInt(getSetting('health_enabled', '0'), 10);
+    var autoTts = parseInt(getSetting('auto_tts', '0'), 10);
+    var webSearch = parseInt(getSetting('web_search_enabled', '1'), 10);
+    var ttsApiKey = getSetting('tts_api_key', '');
+    var hasTtsKey = (ttsApiKey && ttsApiKey.trim().length > 0) ? 1 : 0;
+    sendToWatch({ 'FONT_SIZE': fontSize, 'FONT_BOLD': fontBold, 'DISABLE_SURPRISE': disableSurprise, 'HEALTH_ENABLED': healthEnabled, 'AUTO_TTS': autoTts, 'WEB_SEARCH_ENABLED': webSearch, 'HAS_TTS_KEY': hasTtsKey });
   }, 200);
   setTimeout(sendChatList, 400);  // 稍长间隔确保 READY_STATUS 先到
   setTimeout(sendModelList, 800); // 再发模型列表
@@ -339,7 +346,7 @@ function generateTitle(chatId, userMsg, aiReply) {
 //   - 超时 80秒（大模型思考可能较慢）
 // ═══════════════════════════════════════════════════════════════════════════════
 // JS3 fix: 移除未使用的 onChunk 参数，非流式模式不需要分块回调
-function askAI(question, onFinish) {
+function askAI(question, contextText, onFinish) {
   currentAskSessionId++;
   var thisSessionId = currentAskSessionId;
 
@@ -427,7 +434,7 @@ function askAI(question, onFinish) {
     var replyToSave = accumulatedReply || '(Failed to parse model response)';
     
     var qs = question.length > 800 ? question.substring(0, 800) + '...' : question;
-    var rs = replyToSave.length > 800 ? replyToSave.substring(0, 800) + '...' : replyToSave;
+    var rs = replyToSave.length > 1800 ? replyToSave.substring(0, 1800) + '...' : replyToSave;
 
     chat.messages.push({ role: 'user', content: qs });
     chat.messages.push({ role: 'assistant', content: rs });
@@ -451,7 +458,13 @@ function askAI(question, onFinish) {
   xhr.timeout = 80000;
   xhr.ontimeout = function() { onFinish('Request timed out', ''); };
 
-  var messages = [{ role: 'system', content: systemMessage }].concat(sendMessages);
+  // 拼接 System Prompt + contextText（健康/定位数据）
+  var fullSystemMessage = systemMessage;
+  if (contextText && contextText.length > 0) {
+    fullSystemMessage += '\n\n' + contextText;
+  }
+
+  var messages = [{ role: 'system', content: fullSystemMessage }].concat(sendMessages);
   var body = { model: model, stream: false, messages: messages };
   
   if (model.indexOf('gemma') !== -1) {
@@ -459,7 +472,284 @@ function askAI(question, onFinish) {
     body.extra_body = { reasoning: { enabled: true } };
   }
 
+  // Web Search（仅 OpenRouter）：启用 OpenRouter 的 web 插件让模型联网搜索
+  if (isOpenRouter() && getSetting('web_search_enabled', '1') === '1') {
+    body.plugins = [{ id: 'web' }];
+  }
+
   xhr.send(safeJsonStringify(body));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TTS 语音朗读（Google Cloud TTS → ADPCM 编码 → 分块蓝牙传输）
+//
+// 流程：收到 TTS_REQUEST → 取当前回复文本 → 按句切分 → 逐句调 TTS → ADPCM 编码
+// → 分块发往手表 → 手表端环形缓冲解码播放
+//
+// 语言自动检测：回复含中文字符即用 cmn-CN 语音，否则用 en-US。
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// IMA ADPCM 编码表（公开规范）
+var adpcmStepTable = [7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,337,371,408,449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,27086,29794,32767];
+var adpcmIndexTable = [-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8];
+var jsAdpcmValpred = 0;
+var jsAdpcmIndex = 0;
+
+function resetAdpcmState() {
+  jsAdpcmValpred = 0;
+  jsAdpcmIndex = 0;
+}
+
+// IMA ADPCM 编码：16bit PCM → 4bit ADPCM 字节数组
+function encodeADPCM(pcm16) {
+  var adpcm = [];
+  var buffer = 0;
+  var toggle = false;
+  for (var i = 0; i < pcm16.length; i++) {
+    var diff = pcm16[i] - jsAdpcmValpred;
+    var sign = (diff < 0) ? 8 : 0;
+    if (sign) diff = -diff;
+    var step = adpcmStepTable[jsAdpcmIndex];
+    var delta = 0;
+    var vpdiff = (step >> 3);
+    if (diff >= step) { delta |= 4; diff -= step; vpdiff += step; }
+    step >>= 1;
+    if (diff >= step) { delta |= 2; diff -= step; vpdiff += step; }
+    step >>= 1;
+    if (diff >= step) { delta |= 1; vpdiff += step; }
+    if (sign) jsAdpcmValpred -= vpdiff;
+    else jsAdpcmValpred += vpdiff;
+    if (jsAdpcmValpred > 32767) jsAdpcmValpred = 32767;
+    if (jsAdpcmValpred < -32768) jsAdpcmValpred = -32768;
+    delta |= sign;
+    jsAdpcmIndex += adpcmIndexTable[delta];
+    if (jsAdpcmIndex < 0) jsAdpcmIndex = 0;
+    if (jsAdpcmIndex > 88) jsAdpcmIndex = 88;
+    if (toggle) {
+      buffer |= (delta & 0x0F);
+      adpcm.push(buffer);
+      toggle = false;
+    } else {
+      buffer = (delta & 0x0F) << 4;
+      toggle = true;
+    }
+  }
+  if (toggle) adpcm.push(buffer);
+  return adpcm;
+}
+
+// 低通滤波（3 点均值，减少压缩噪音）
+function lowPassFilter(samples) {
+  if (samples.length < 2) return samples;
+  var filtered = [samples[0], samples[1]];
+  for (var i = 2; i < samples.length; i++) {
+    filtered[i] = Math.round((samples[i] + samples[i - 1] + samples[i - 2]) / 3);
+  }
+  return filtered;
+}
+
+// 检测文本语言：含中文字符返回中文语音，否则返回英文语音
+function detectTTSVoice(text) {
+  if (/[\u4e00-\u9fff]/.test(text)) {
+    return { lang: 'cmn-CN', name: 'cmn-CN-Wavenet-A' };
+  }
+  return { lang: 'en-US', name: 'en-US-Journey-F' };
+}
+
+// TTS 朗读主流程
+var ttsSessionId = 0;         // 递增防止旧进程干扰新请求
+var ttsIsFetching = false;
+var ttsSentenceQueue = [];
+var ttsAudioQueue = [];
+
+// 取消 TTS：手表停止朗读时调用。递增 sessionId 断绝旧进程，
+// 清空音频/句子队列，并从 amQueue 移除所有待发的 TTS_CHUNK/TTS_END/TTS_DONE。
+function cancelTTS() {
+  ttsSessionId++;  // 旧 session 的 fetch/send 回调比对失败即停止
+  ttsIsFetching = false;
+  ttsAudioQueue = [];
+  ttsSentenceQueue = [];
+  // 从 amQueue 移除待发的 TTS 消息。
+  // 注意：若 amQueue[0] 正在发送（amSending=true），必须保留它，
+  // 否则发送成功回调的 amQueue.shift() 会 shift 掉错误元素。
+  var startIndex = amSending ? 1 : 0;
+  var kept = amQueue.slice(0, startIndex);
+  var rest = amQueue.slice(startIndex).filter(function(item) {
+    return typeof item.payload['TTS_CHUNK'] === 'undefined' &&
+           typeof item.payload['TTS_END'] === 'undefined' &&
+           typeof item.payload['TTS_DONE'] === 'undefined';
+  });
+  amQueue = kept.concat(rest);
+}
+
+function startTTS() {
+  ttsSessionId++;  // 断绝旧进程
+  var thisSession = ttsSessionId;
+
+  var ttsApiKey = getSetting('tts_api_key', '');
+  if (!ttsApiKey || ttsApiKey.trim().length === 0) {
+    sendToWatch({ 'STATUS': 'No TTS API key' });
+    return;
+  }
+
+  var store = loadStore();
+  var chat = getActiveChat(store);
+  if (!chat || !chat.messages || chat.messages.length === 0) {
+    sendToWatch({ 'STATUS': 'No text to read' });
+    return;
+  }
+
+  // 取最后一条 assistant 消息
+  var replyText = '';
+  for (var i = chat.messages.length - 1; i >= 0; i--) {
+    if (chat.messages[i].role === 'assistant') {
+      replyText = chat.messages[i].content;
+      break;
+    }
+  }
+  if (!replyText || replyText.length === 0) {
+    sendToWatch({ 'STATUS': 'No text to read' });
+    return;
+  }
+
+  // 按句切分（兼容中英文标点）
+  var sentences = replyText.match(/[^.!?。！？]+[.!?。！？]*/g) || [replyText];
+  ttsSentenceQueue = [];
+  for (var s = 0; s < sentences.length; s++) {
+    var trimmed = sentences[s].trim();
+    if (trimmed.length > 0) ttsSentenceQueue.push(trimmed);
+  }
+  if (ttsSentenceQueue.length === 0) {
+    sendToWatch({ 'STATUS': 'No TTS text' });
+    return;
+  }
+
+  // 清空残留队列，防止旧 session 残留数据混入
+  ttsAudioQueue = [];
+  ttsIsFetching = false;
+  resetAdpcmState();
+
+  ttsFetchNext(ttsApiKey, thisSession);
+  ttsSendNext(thisSession);
+}
+
+// LOOP 1：逐句调 Google TTS → 编码为 ADPCM → 推入音频队列
+function ttsFetchNext(ttsApiKey, sessionId) {
+  if (ttsIsFetching || ttsSentenceQueue.length === 0) return;
+  if (sessionId !== ttsSessionId) return;  // 旧 session，停止
+  ttsIsFetching = true;
+
+  var sentence = ttsSentenceQueue.shift();
+  var voice = detectTTSVoice(sentence);
+
+  var url = 'https://texttospeech.googleapis.com/v1/text:synthesize?key=' + ttsApiKey;
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', url, true);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  
+  var body = {
+    input: { text: sentence },
+    voice: { languageCode: voice.lang, name: voice.name },
+    audioConfig: { audioEncoding: 'LINEAR16', sampleRateHertz: 8000, speakingRate: 0.92 }
+  };
+
+  xhr.onload = function() {
+    if (sessionId !== ttsSessionId) return;  // 旧 session，丢弃
+    if (xhr.status >= 200 && xhr.status < 300) {
+      try {
+        var data = JSON.parse(xhr.responseText);
+        if (data.audioContent) {
+          var decoded = atob(data.audioContent);
+          var pcm16 = [];
+          // 跳过 WAV 头（44 字节）
+          for (var i = 44; i < decoded.length; i += 2) {
+            var lo = decoded.charCodeAt(i);
+            var hi = decoded.charCodeAt(i + 1);
+            var sample = (hi << 8) | lo;
+            if (sample > 32767) sample -= 65536;
+            pcm16.push(sample);
+          }
+          pcm16 = lowPassFilter(pcm16);
+          var adpcmBytes = encodeADPCM(pcm16);
+          ttsAudioQueue.push(adpcmBytes);
+        }
+      } catch (e) {
+        console.log('[TTS] Parse error: ' + e);
+      }
+    } else {
+      // HTTP 错误（403 鉴权失败/配额超限/无效 key 等）：先本地停止发送，再通知手表
+      console.log('[TTS] HTTP error: ' + xhr.status);
+      cancelTTS();  // 立即清队列，防止 ttsSendNext 继续发残余 chunk 导致手表重新播放
+      var errMsg = 'TTS error: HTTP ' + xhr.status;
+      try {
+        var errData = JSON.parse(xhr.responseText);
+        if (errData && errData.error && errData.error.message) {
+          errMsg = 'TTS: ' + errData.error.message.substring(0, 40);
+        }
+      } catch (e2) {}
+      sendToWatch({ 'STATUS': errMsg });  // 手表收到后 tts_stop（也会回 TTS_CANCEL，但 cancelTTS 已执行过，幂等）
+      ttsIsFetching = false;
+      return;
+    }
+    ttsIsFetching = false;
+    ttsFetchNext(ttsApiKey, sessionId);
+  };
+
+  xhr.onerror = function() {
+    if (sessionId !== ttsSessionId) return;
+    console.log('[TTS] Network error');
+    cancelTTS();  // 先本地清队列
+    sendToWatch({ 'STATUS': 'TTS: network error' });
+    ttsIsFetching = false;
+    return;
+  };
+
+  xhr.send(safeJsonStringify(body));
+}
+
+// LOOP 2：从音频队列取 ADPCM 数据 → 分块入 amQueue 串行发送
+// 背压：限制 amQueue 里待发的 TTS chunk 数量，避免灌满手表 16KB 环形缓冲后溢出丢字节。
+// 手表缓冲 16384B / 每 chunk 700B ≈ 23 chunk 容量；水位设 6（~4.2KB ≈ 1秒音频）留足余量。
+// 超过水位则等播放消耗后再推，JS 不超前发送 → 手表缓冲不会溢出 → ADPCM 状态不丢步。
+var TTS_AMQUEUE_WATERMARK = 6;
+
+function ttsSendNext(sessionId) {
+  if (sessionId !== ttsSessionId) return;  // 旧 session，停止
+  // 背压：统计 amQueue 里待发的 TTS chunk，超水位则等消化后再推
+  var pendingTtsChunks = 0;
+  for (var q = 0; q < amQueue.length; q++) {
+    if (typeof amQueue[q].payload['TTS_CHUNK'] !== 'undefined') pendingTtsChunks++;
+  }
+  if (pendingTtsChunks >= TTS_AMQUEUE_WATERMARK) {
+    setTimeout(function() { ttsSendNext(sessionId); }, 400);
+    return;
+  }
+  if (ttsAudioQueue.length === 0) {
+    // 队列空了但句子可能还在编码，等一会再查
+    if (ttsIsFetching || ttsSentenceQueue.length > 0) {
+      setTimeout(function() { ttsSendNext(sessionId); }, 400);
+      return;
+    }
+    // 全部句子发完且无在途编码：发"朗读全部结束"标记
+    // （手表据此置 s_tts_playing=false，恢复按钮正常语义）
+    sendToWatch({ 'TTS_DONE': 1 });
+    return;
+  }
+
+  var adpcmBytes = ttsAudioQueue.shift();
+  var chunkSize = 700;
+  for (var i = 0; i < adpcmBytes.length; i += chunkSize) {
+    var chunk = [];
+    for (var j = 0; j < chunkSize && (i + j) < adpcmBytes.length; j++) {
+      chunk.push(adpcmBytes[i + j]);
+    }
+    sendToWatch({ 'TTS_CHUNK': chunk });
+  }
+  // 当前句发完，发结束标记
+  sendToWatch({ 'TTS_END': 1 });
+
+  // 继续发下一句（通过轮询，等 amQueue 消化 + 新句子编码好）
+  setTimeout(function() { ttsSendNext(sessionId); }, 4);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -480,6 +770,21 @@ Pebble.addEventListener('appmessage', function(e) {
     console.log('[Model] Switched to: ' + modelName);
     // 不清空对话历史，只切换模型 → 下一次 askAI 自动用新模型
     setTimeout(sendModelList, 200);  // 确认回传
+    return;
+  }
+
+  // 手表菜单切换联网搜索 → 更新 localStorage 真值（双路同步：手表改 config 真值）
+  if (typeof e.payload['SWITCH_WEB_SEARCH'] !== 'undefined') {
+    var wsVal = e.payload['SWITCH_WEB_SEARCH'] ? '1' : '0';
+    localStorage.setItem('web_search_enabled', wsVal);
+    console.log('[WebSearch] Switched to: ' + wsVal);
+    return;
+  }
+
+  // 手表取消 TTS（用户按 SELECT 停止 / 切对话 / 新建对话）：停止 JS 端发送并清队列
+  if (typeof e.payload['TTS_CANCEL'] !== 'undefined') {
+    console.log('[TTS] Cancel received from watch');
+    cancelTTS();
     return;
   }
 
@@ -532,15 +837,67 @@ Pebble.addEventListener('appmessage', function(e) {
     return;
   }
 
+  // ── TTS 朗读请求 ──
+  if (typeof e.payload['TTS_REQUEST'] !== 'undefined') {
+    startTTS();
+    return;
+  }
+
   var question = e.payload['QUESTION'];
   if (!question || question.trim().length === 0) return;  // 空问题直接忽略
+
+  // 提取健康数据（手表端随 QUESTION 一起发来）。
+  // -1 哨兵 = 数据不可用（HEALTH_VALUE_UNAVAILABLE 或无健康 API 平台），不注入；
+  // 0 = 合法零值（清晨/久坐），正常注入。
+  var stepCount = (typeof e.payload['STEP_COUNT'] !== 'undefined') ? e.payload['STEP_COUNT'] : -1;
+  var activeMinutes = (typeof e.payload['ACTIVE_MINUTES'] !== 'undefined') ? e.payload['ACTIVE_MINUTES'] : -1;
 
   console.log('Q: ' + question.substring(0, 60));
 
   var MAX_WATCH_CHARS = 1800;  // 手表端单条回复的展示上限（C 端 R_BUF_SIZE=2048，留余量防溢出）
 
+  // 构造健康数据上下文（只要有一个指标可用即注入，合法 0 也算）
+  var contextText = '';
+  if (stepCount >= 0 || activeMinutes >= 0) {
+    contextText = 'Current health data:';
+    if (stepCount >= 0) contextText += '\n- Steps today: ' + stepCount;
+    if (activeMinutes >= 0) contextText += '\n- Active minutes: ' + activeMinutes;
+  }
+
+  // 检查定位开关
+  var locationEnabled = (getSetting('location_enabled', '0') === '1');
+
+  // 如果定位开关打开，先获取 GPS，再调 askAI；否则直接调
+  if (locationEnabled) {
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        function success(pos) {
+          var lat = pos.coords.latitude.toFixed(2);
+        var lng = pos.coords.longitude.toFixed(2);
+          if (contextText) contextText += '\n';
+          contextText += '- Approx location: ' + lat + ', ' + lng;
+          callAskAI(question, contextText, MAX_WATCH_CHARS);
+        },
+        function error() {
+        // 定位失败（用户拒绝/超时），不带定位继续
+          callAskAI(question, contextText, MAX_WATCH_CHARS);
+        },
+        { enableHighAccuracy: false, timeout: 2000, maximumAge: 300000 }
+      );
+    } else {
+      // 浏览器不支持定位，不带定位继续
+    callAskAI(question, contextText, MAX_WATCH_CHARS);
+    }
+  } else {
+    // 定位开关关闭，直接调
+    callAskAI(question, contextText, MAX_WATCH_CHARS);
+  }
+});
+
+// 提取出来的 askAI 调用逻辑，支持 contextText 注入
+function callAskAI(question, contextText, MAX_WATCH_CHARS) {
   // JS3 fix: 移除 onChunk 死代码，非流式模式下直接在 onFinish 中处理完整回复
-  askAI(question, function onFinish(err, reply) {
+  askAI(question, contextText, function onFinish(err, reply) {
     if (err) {
       console.log('Error: ' + err);
       sendToWatch({ 'STATUS': 'Error: ' + err.substring(0, 40) });
@@ -554,13 +911,13 @@ Pebble.addEventListener('appmessage', function(e) {
         text += '\n[...truncated]';
       }
       var chunkSize = 256;
-      for (var i = 0; i < text.length; i += chunkSize) {
+    for (var i = 0; i < text.length; i += chunkSize) {
         sendToWatch({ 'REPLY_CHUNK': text.substring(i, i + chunkSize) });
       }
     }
     sendToWatch({ 'REPLY_END': 1 });
   });
-});
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 配置页面
@@ -605,6 +962,11 @@ Pebble.addEventListener('showConfiguration', function() {
     + '&font_size=' + encodeURIComponent(getSetting('font_size', '0'))
     + '&font_bold=' + encodeURIComponent(getSetting('font_bold', '0'))
     + '&disable_surprise=' + encodeURIComponent(getSetting('disable_surprise', '0'))
+    + '&location_enabled=' + encodeURIComponent(getSetting('location_enabled', '0'))
+    + '&web_search_enabled=' + encodeURIComponent(getSetting('web_search_enabled', '1'))
+    + '&health_enabled=' + encodeURIComponent(getSetting('health_enabled', '0'))
+    + '&auto_tts=' + encodeURIComponent(getSetting('auto_tts', '0'))
+    + '&has_tts_key=' + (getSetting('tts_api_key', '') ? '1' : '0')
     + '#export_data=' + encodeURIComponent(JSON.stringify(safeDocs));
 
   Pebble.openURL(url);
@@ -623,6 +985,10 @@ Pebble.addEventListener('webviewclosed', function(e) {
       localStorage.removeItem('api_key');
     } else if (settings.api_key && settings.api_key.trim().length > 0) {
       localStorage.setItem('api_key', settings.api_key.trim());
+    }
+
+    if (settings.delete_tts_key) {
+      localStorage.removeItem('tts_api_key');
     }
 
     if (settings.api_mode) {
@@ -656,6 +1022,21 @@ Pebble.addEventListener('webviewclosed', function(e) {
     }
     if (typeof settings.disable_surprise !== 'undefined') {
       localStorage.setItem('disable_surprise', String(settings.disable_surprise));
+    }
+    if (typeof settings.location_enabled !== 'undefined') {
+      localStorage.setItem('location_enabled', String(settings.location_enabled));
+    }
+    if (typeof settings.web_search_enabled !== 'undefined') {
+      localStorage.setItem('web_search_enabled', String(settings.web_search_enabled));
+    }
+    if (typeof settings.health_enabled !== 'undefined') {
+      localStorage.setItem('health_enabled', String(settings.health_enabled));
+    }
+    if (typeof settings.auto_tts !== 'undefined') {
+      localStorage.setItem('auto_tts', String(settings.auto_tts));
+    }
+    if (settings.tts_api_key && settings.tts_api_key.trim().length > 0) {
+      localStorage.setItem('tts_api_key', settings.tts_api_key.trim());
     }
 
     if (settings.switch_to) {

@@ -98,7 +98,7 @@ static int s_pulse_frame = 0;
 #define PULSE_INTERVAL_MS 4000       // 静止 4 秒后触发一次脉冲
 #define PULSE_FIRST_MS    1500       // 首次脉冲更快（1.5 秒后）
 
-static bool s_user_scrolled = false;  // 用户手动滚动过则停止自动滚动到底部
+static bool s_user_scrolled = false;  // 用户手动滚动过则停止自动滚动到顶部
 
 static AppTimer *s_thinking_timeout = NULL;
 #define THINKING_TIMEOUT_MS 90000    // THINKING 状态超时 90 秒（从 SENDING 开始算）
@@ -150,11 +150,69 @@ static MenuLayer *s_model_menu_layer;
 #define PERSIST_KEY_FONT_SIZE        2  // 字号: 0=Normal, 1=Large, 2=Extra Large
 #define PERSIST_KEY_FONT_BOLD        3  // 加粗: 0=否, 1=是
 #define PERSIST_KEY_DISABLE_SURPRISE 4  // 禁用彩蛋: 0=启用, 1=禁用
+#define PERSIST_KEY_TTS_VOLUME       5  // TTS 音量: 0-100
+#define PERSIST_KEY_HEALTH_ENABLED   6  // 健康数据开关: 0=关闭, 1=开启
+#define PERSIST_KEY_AUTO_TTS         7  // 自动朗读: 0=关闭, 1=开启
+#define PERSIST_KEY_WEB_SEARCH       8  // 联网搜索: 0=关闭, 1=开启
+#define PERSIST_KEY_HAS_TTS_KEY      9  // 是否已配 TTS key: 0=否, 1=是（抑制无 key 时的空震动）
 
 // ── 字体设置 ──────────────────────────────────────────────────────────────────
 static int s_font_size = 0;       // 0=Normal, 1=Large, 2=Extra Large
 static int s_font_bold = 0;       // 0=不加粗, 1=加粗
 static int s_disable_surprise = 0; // 0=启用彩蛋, 1=禁用彩蛋
+static int s_health_enabled = 0;  // 0=不发健康数据, 1=发健康数据
+static int s_auto_tts = 0;        // 0=不自动朗读, 1=收到回复自动朗读（仅 Emery）
+static int s_web_search = 1;      // 0=不联网搜索, 1=联网搜索（默认开，仅 OpenRouter 生效，由 JS 端判断）
+static int s_has_tts_key = 0;     // 0=未配 TTS key, 1=已配（抑制无 key 时的空震动/空朗读）
+static int s_auto_tts_pending = 0; // 回复到达后等待动画完成再触发 TTS（仅 Emery）
+
+// ── 健康数据（随 QUESTION 一起发送）───────────────────────────────
+static int32_t s_step_count = 0;
+static int32_t s_active_minutes = 0;
+
+// ── TTS 语音播放（仅 Emery 平台有扬声器）──────────────────────────
+#if defined(PBL_PLATFORM_EMERY)
+#define TTS_RING_SIZE        16384  // 环形缓冲区（Emery RAM 充足）
+#define TTS_DECODE_BYTES     800    // 每次解码的 ADPCM 字节数
+#define TTS_PLAYBACK_MS      200    // 播放定时器间隔
+#define TTS_START_THRESHOLD  3000   // 缓冲达到此字节数后开始播放
+#define TTS_CLOSE_DELAY_MS   1500   // 句间延迟关闭扬声器
+#define TTS_WATCHDOG_MS      30000  // TTS 看门狗：30s 无任何 chunk/done 则超时清理
+
+static uint8_t s_tts_ring[TTS_RING_SIZE];
+static uint32_t s_tts_head = 0;
+static uint32_t s_tts_tail = 0;
+static uint32_t s_tts_count = 0;
+static bool s_tts_playing = false;       // 是否正在播放（含缓冲中）
+static bool s_tts_loading = false;       // TTS 已请求、等待首个音频块期间
+static bool s_tts_all_sent = false;      // JS 已发完所有数据（TTS_DONE 到达），等缓冲排空后置 playing=false
+static bool s_speaker_open = false;
+static int s_tts_volume = 100;           // 0-100
+static AppTimer *s_tts_playback_timer = NULL;
+static AppTimer *s_tts_close_timer = NULL;
+static AppTimer *s_tts_watchdog_timer = NULL;
+
+// IMA ADPCM 解码状态
+static int32_t s_adpcm_valpred = 0;
+static int32_t s_adpcm_index = 0;
+
+// IMA ADPCM 标准量化表（公开规范 IMA/DVI ADPCM）
+static const int16_t s_adpcm_step_table[89] = {
+  7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,
+  34,37,41,45,50,55,60,66,73,80,88,97,107,118,
+  130,143,157,173,190,209,230,253,279,307,337,
+  371,408,449,494,544,598,658,724,796,876,963,
+  1060,1166,1282,1411,1552,1707,1878,2066,2272,
+  2499,2749,3024,3327,3660,4026,4428,4871,5358,
+  5894,6484,7132,7845,8630,9493,10442,11487,
+  12635,13899,15289,16818,18500,20350,22385,
+  24623,27086,29794,32767
+};
+static const int8_t s_adpcm_index_table[16] = {
+  -1,-1,-1,-1,2,4,6,8,
+  -1,-1,-1,-1,2,4,6,8
+};
+#endif
 
 #define R_BUF_SIZE 2048
 static char s_reply_buf[R_BUF_SIZE];
@@ -200,16 +258,230 @@ static void update_response_text(void) {
     if (content_h < scroll_h) content_h = scroll_h;
     scroll_layer_set_content_size(s_scroll_layer, GSize(s_width, content_h));
 
-    // 自动滚动到底部（除非用户手动滚过）
+    // 自动滚动到顶部，从头开始阅读（除非用户手动滚过）
     if (!s_user_scrolled) {
-      int max_offset = content_h - scroll_h;
-      if (max_offset > 0) {
-        scroll_layer_set_content_offset(s_scroll_layer,
-                                        GPoint(0, -max_offset), true);
+      scroll_layer_set_content_offset(s_scroll_layer, GPointZero, false);
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 健康数据读取
+//
+// 读取今日步数和活跃分钟，随 QUESTION 一起发给手机端注入 System Prompt。
+// PBL_HEALTH 保护：无健康 API 的平台（如 Aplite）跳过，发 -1 哨兵（JS 端不注入）。
+// 有健康 API 但数据不可用（HEALTH_VALUE_UNAVAILABLE）也发 -1；合法 0 正常发。
+// ═══════════════════════════════════════════════════════════════════════════════
+static void read_health_data(void) {
+#if defined(PBL_HEALTH)
+  // 显式区分 HEALTH_VALUE_UNAVAILABLE（数据不可用）与合法值（含 0）。
+  // 不可用 → 发 -1 哨兵，JS 端据此不注入；合法 0 → 正常发 0，JS 端注入。
+  HealthValue steps = health_service_sum_today(HealthMetricStepCount);
+  s_step_count = (steps == HEALTH_VALUE_UNAVAILABLE) ? -1 : (int32_t)steps;
+
+  HealthValue active_sec = health_service_sum_today(HealthMetricActiveSeconds);
+  s_active_minutes = (active_sec == HEALTH_VALUE_UNAVAILABLE) ? -1 : (int32_t)((active_sec + 30) / 60);
+#else
+  s_step_count = -1;   // 无健康 API 的平台：哨兵值，JS 端不注入
+  s_active_minutes = -1;
+#endif
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TTS 语音播放（仅 Emery 平台）
+//
+// 手机端把 AI 回复经 Google TTS → IMA ADPCM 编码 → 分块发来。
+// 手表端：收 ADPCM → 环形缓冲 → 定时解码为 8bit PCM → speaker_stream_write 播放。
+// ═══════════════════════════════════════════════════════════════════════════════
+#if defined(PBL_PLATFORM_EMERY)
+static void tts_reset_adpcm(void) {
+  s_adpcm_valpred = 0;
+  s_adpcm_index = 0;
+}
+
+// 解码单个 4bit ADPCM nibble 为 8bit PCM（含音量缩放）
+static int8_t tts_decode_nibble(uint8_t delta) {
+  int32_t step = s_adpcm_step_table[s_adpcm_index];
+  int32_t vpdiff = step >> 3;
+
+  if (delta & 4) vpdiff += step;
+  if (delta & 2) vpdiff += (step >> 1);
+  if (delta & 1) vpdiff += (step >> 2);
+
+  if (delta & 8) {
+    s_adpcm_valpred -= vpdiff;
+  } else {
+    s_adpcm_valpred += vpdiff;
+  }
+
+  if (s_adpcm_valpred > 32767) s_adpcm_valpred = 32767;
+  if (s_adpcm_valpred < -32768) s_adpcm_valpred = -32768;
+
+  s_adpcm_index += s_adpcm_index_table[delta];
+  if (s_adpcm_index < 0) s_adpcm_index = 0;
+  if (s_adpcm_index > 88) s_adpcm_index = 88;
+
+  // 音量缩放（整数运算，0-100）后取高 8 位
+  int32_t scaled = (s_adpcm_valpred * s_tts_volume) / 100;
+  int16_t pcm8 = scaled >> 8;
+  if (pcm8 > 127) pcm8 = 127;
+  if (pcm8 < -128) pcm8 = -128;
+  return (int8_t)pcm8;
+}
+
+static void tts_cancel_close_timer(void) {
+  if (s_tts_close_timer) {
+    app_timer_cancel(s_tts_close_timer);
+    s_tts_close_timer = NULL;
+  }
+}
+
+static void tts_delayed_close_callback(void *data) {
+  s_tts_close_timer = NULL;
+  if (s_tts_count == 0 && s_speaker_open) {
+    speaker_stream_close();
+    s_speaker_open = false;
+    // 全部数据已发完且缓冲排空：朗读会话真正结束，置 playing=false 恢复按钮语义。
+    // 句间停顿（all_sent 未置）时只关扬声器，保留 playing=true 让 SELECT 停止手势有效。
+    if (s_tts_all_sent) {
+      s_tts_playing = false;
+      s_tts_loading = false;
+      s_tts_all_sent = false;
+      layer_mark_dirty(s_canvas_layer);
+      if (s_tts_watchdog_timer) {
+        app_timer_cancel(s_tts_watchdog_timer);
+        s_tts_watchdog_timer = NULL;
       }
     }
   }
 }
+
+static void tts_schedule_close_timer(void) {
+  tts_cancel_close_timer();
+  s_tts_close_timer = app_timer_register(TTS_CLOSE_DELAY_MS, tts_delayed_close_callback, NULL);
+}
+
+// TTS 看门狗：防止 TTS_DONE/STATUS 被蓝牙丢弃导致 playing/loading 永久卡死
+static void tts_watchdog_callback(void *data) {
+  s_tts_watchdog_timer = NULL;
+  if (s_tts_playing) {
+    APP_LOG(APP_LOG_LEVEL_WARNING, "TTS watchdog timeout");
+    tts_stop();
+    vibes_double_pulse();
+  }
+}
+
+static void tts_reset_watchdog(void) {
+  if (s_tts_watchdog_timer) app_timer_cancel(s_tts_watchdog_timer);
+  s_tts_watchdog_timer = app_timer_register(TTS_WATCHDOG_MS, tts_watchdog_callback, NULL);
+}
+
+// 把收到的 ADPCM 字节推入环形缓冲
+static void tts_push(const uint8_t *data, uint16_t len) {
+  for (uint16_t i = 0; i < len; i++) {
+    if (s_tts_count < TTS_RING_SIZE) {
+      s_tts_ring[s_tts_tail] = data[i];
+      s_tts_tail = (s_tts_tail + 1) % TTS_RING_SIZE;
+      s_tts_count++;
+    }
+  }
+  tts_cancel_close_timer();
+}
+
+static void tts_playback_timer_callback(void *data);
+
+static void tts_start_playback(void) {
+  tts_cancel_close_timer();
+  if (!s_speaker_open) {
+    bool ok = speaker_stream_open(SpeakerPcmFormat_8kHz_8bit, 100);
+    if (!ok) {
+      APP_LOG(APP_LOG_LEVEL_ERROR, "Speaker open failed");
+      return;
+    }
+    s_speaker_open = true;
+  }
+  if (!s_tts_playback_timer) {
+    s_tts_playback_timer = app_timer_register(TTS_PLAYBACK_MS, tts_playback_timer_callback, NULL);
+  }
+}
+
+static void tts_playback_timer_callback(void *data) {
+  s_tts_playback_timer = NULL;
+  if (!s_speaker_open) return;
+
+  static int8_t s_out_buf[TTS_DECODE_BYTES * 2];
+
+  int decode_count = (s_tts_count >= TTS_DECODE_BYTES) ? TTS_DECODE_BYTES : s_tts_count;
+  if (decode_count > 0) {
+    for (int i = 0; i < decode_count; i++) {
+      uint8_t b = s_tts_ring[s_tts_head];
+      s_tts_head = (s_tts_head + 1) % TTS_RING_SIZE;
+      s_tts_count--;
+      uint8_t n1 = (b >> 4) & 0x0F;
+      uint8_t n2 = b & 0x0F;
+      s_out_buf[i * 2]     = tts_decode_nibble(n1);
+      s_out_buf[i * 2 + 1] = tts_decode_nibble(n2);
+    }
+    speaker_stream_write((uint8_t *)s_out_buf, decode_count * 2);
+    s_tts_playback_timer = app_timer_register(TTS_PLAYBACK_MS, tts_playback_timer_callback, NULL);
+  } else {
+    // 缓冲空，安排延迟关闭
+    tts_schedule_close_timer();
+  }
+}
+
+static void tts_stop(void) {
+  if (s_speaker_open) {
+    speaker_stream_close();
+    s_speaker_open = false;
+  }
+  if (s_tts_playback_timer) {
+    app_timer_cancel(s_tts_playback_timer);
+    s_tts_playback_timer = NULL;
+  }
+  tts_cancel_close_timer();
+  s_tts_head = 0;
+  s_tts_tail = 0;
+  s_tts_count = 0;
+  s_tts_playing = false;
+  s_tts_loading = false;
+  s_tts_all_sent = false;
+  s_auto_tts_pending = 0;
+  if (s_tts_watchdog_timer) {
+    app_timer_cancel(s_tts_watchdog_timer);
+    s_tts_watchdog_timer = NULL;
+  }
+  tts_reset_adpcm();
+  // 通知 JS 取消：停止 fetch/send 并清空 amQueue 里的 TTS chunk，
+  // 防止手表停止后 JS 队列残余 chunk 继续到达导致音频自动恢复播放。
+  // 用独立 iter 发送，失败静默忽略（tts_stop 本身已清本地状态）。
+  DictionaryIterator *iter;
+  if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
+    dict_write_uint8(iter, MESSAGE_KEY_TTS_CANCEL, 1);
+    app_message_outbox_send();
+  }
+}
+
+// 向手机请求朗读当前回复
+static void tts_request(void) {
+  tts_stop();          // 清掉旧状态
+  tts_reset_adpcm();
+  s_tts_playing = true;
+  s_tts_loading = true;
+  layer_mark_dirty(s_canvas_layer);  // 立即显示 "Reading..." 提示
+  DictionaryIterator *iter;
+  if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
+    dict_write_uint8(iter, MESSAGE_KEY_TTS_REQUEST, 1);
+    app_message_outbox_send();
+    vibes_short_pulse();
+    tts_reset_watchdog();  // 启动看门狗，防 TTS_DONE/STATUS 丢失导致卡死
+  } else {
+    s_tts_playing = false;
+    s_tts_loading = false;
+    vibes_double_pulse();
+  }
+}
+#endif  // PBL_PLATFORM_EMERY
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 字体设置应用
@@ -580,6 +852,10 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
       draw_color_bar(ctx);
 
       const char *title = (s_active_chat_index >= 0 && s_active_chat_index < s_chat_count) ? s_chat_entries[s_active_chat_index].title : "New chat";
+#if defined(PBL_PLATFORM_EMERY)
+      // TTS 等待首个音频块期间，标题替换为 "Reading..." 作为加载反馈
+      if (s_tts_loading) title = "Reading...";
+#endif
       // Response 标题字体联动字号设置：Normal→GOTHIC_14_BOLD, Large→GOTHIC_18_BOLD, X-Large→GOTHIC_24_BOLD
       GFont title_font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
       int title_h = 20;
@@ -770,9 +1046,22 @@ static void dictation_callback(DictationSession *session,
   if (status == DictationSessionStatusSuccess && transcription && transcription[0] != '\0') {
     // 保存问题用于显示
     snprintf(s_question_display, sizeof(s_question_display), "You: %s", transcription);
+    
+    // 读取最新健康数据（仅在用户开启时）
+    if (s_health_enabled) {
+      read_health_data();
+    } else {
+      s_step_count = -1;   // 开关关闭：哨兵值（且不发 STEP_COUNT，JS 端默认 -1 不注入）
+      s_active_minutes = -1;
+    }
+
     DictionaryIterator *iter;
     if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
       dict_write_cstring(iter, MESSAGE_KEY_QUESTION, transcription);
+      if (s_health_enabled) {
+        dict_write_int32(iter, MESSAGE_KEY_STEP_COUNT, s_step_count);
+        dict_write_int32(iter, MESSAGE_KEY_ACTIVE_MINUTES, s_active_minutes);
+      }
       app_message_outbox_send();
       set_state(STATE_SENDING);
     } else {
@@ -848,6 +1137,13 @@ static void set_state(AppState new_state) {
       }
       s_user_scrolled = false;
       update_response_text();
+#if defined(PBL_PLATFORM_EMERY)
+      // 自动朗读：动画完成后触发 TTS
+      if (s_auto_tts_pending) {
+        s_auto_tts_pending = 0;
+        tts_request();
+      }
+#endif
       break;
 
     default:
@@ -964,6 +1260,35 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     persist_write_int(PERSIST_KEY_DISABLE_SURPRISE, s_disable_surprise);
   }
 
+  // 健康数据开关 (0=关闭, 1=开启)
+  Tuple *health_enabled_t = dict_find(iter, MESSAGE_KEY_HEALTH_ENABLED);
+  if (health_enabled_t) {
+    s_health_enabled = health_enabled_t->value->uint8 ? 1 : 0;
+    persist_write_int(PERSIST_KEY_HEALTH_ENABLED, s_health_enabled);
+  }
+
+  // 自动朗读开关 (0=关闭, 1=开启，仅 Emery 生效)
+  Tuple *auto_tts_t = dict_find(iter, MESSAGE_KEY_AUTO_TTS);
+  if (auto_tts_t) {
+    s_auto_tts = auto_tts_t->value->uint8 ? 1 : 0;
+    persist_write_int(PERSIST_KEY_AUTO_TTS, s_auto_tts);
+  }
+
+  // TTS key 状态 (0=未配, 1=已配) — 用于抑制无 key 时的 Auto TTS 空震动
+  Tuple *has_tts_key_t = dict_find(iter, MESSAGE_KEY_HAS_TTS_KEY);
+  if (has_tts_key_t) {
+    s_has_tts_key = has_tts_key_t->value->uint8 ? 1 : 0;
+    persist_write_int(PERSIST_KEY_HAS_TTS_KEY, s_has_tts_key);
+  }
+
+  // 联网搜索开关 (0=关闭, 1=开启，默认开，仅 OpenRouter 生效由 JS 端判断)
+  Tuple *web_search_t = dict_find(iter, MESSAGE_KEY_WEB_SEARCH_ENABLED);
+  if (web_search_t) {
+    s_web_search = web_search_t->value->uint8 ? 1 : 0;
+    persist_write_int(PERSIST_KEY_WEB_SEARCH, s_web_search);
+    if (s_menu_layer) menu_layer_reload_data(s_menu_layer);
+  }
+
   // 用户问题（切换对话时由 JS 发来的历史问题）
   Tuple *user_q_t = dict_find(iter, MESSAGE_KEY_USER_QUESTION);
   if (user_q_t) {
@@ -995,12 +1320,25 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   } else if (reply_end_t) {
     if (s_state == STATE_THINKING || s_state == STATE_SENDING) {
       set_state(STATE_SHRINKING);
+#if defined(PBL_PLATFORM_EMERY)
+      // 自动朗读：仅新问答路径（SHRINKING→RESPONSE）才标记待触发。
+      // 需已配 TTS key，否则每条回复会空震动一次（JS 预检失败静默）。
+      if (s_auto_tts && s_has_tts_key && s_reply_buf[0] != '\0') {
+        s_auto_tts_pending = 1;
+      }
+#endif
     }
   } else if (reply_t) {
     snprintf(s_reply_buf, sizeof(s_reply_buf), "%s", reply_t->value->cstring);
     if (s_state == STATE_THINKING || s_state == STATE_SENDING) {
       // 缩小动画 → RESPONSE
       set_state(STATE_SHRINKING);
+#if defined(PBL_PLATFORM_EMERY)
+      // 自动朗读：兜底完整回复路径同样标记（需已配 TTS key）
+      if (s_auto_tts && s_has_tts_key && s_reply_buf[0] != '\0') {
+        s_auto_tts_pending = 1;
+      }
+#endif
     } else if (s_state == STATE_RESPONSE) {
       update_response_text();
     }
@@ -1008,6 +1346,13 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
 
   Tuple *status_t = dict_find(iter, MESSAGE_KEY_STATUS);
   if (status_t && !reply_t && !reply_chunk_t) {
+#if defined(PBL_PLATFORM_EMERY)
+    // TTS 失败回传的 STATUS：清理 TTS 状态，不污染回复内容
+    if (s_tts_playing) {
+      tts_stop();
+      return;
+    }
+#endif
     // C2 fix: 追加错误信息前检查剩余空间，防止逼近缓冲区上限
     size_t remaining = sizeof(s_reply_buf) - strlen(s_reply_buf) - 1;
     if (strlen(s_reply_buf) > 0 && remaining > 12) {
@@ -1027,6 +1372,55 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
       update_response_text();
     }
   }
+
+#if defined(PBL_PLATFORM_EMERY)
+  // TTS 音频分块（ADPCM 字节）
+  Tuple *tts_chunk_t = dict_find(iter, MESSAGE_KEY_TTS_CHUNK);
+  if (tts_chunk_t) {
+    s_tts_playing = true;
+    // 首个音频块到达：清除加载提示，恢复原标题
+    if (s_tts_loading) {
+      s_tts_loading = false;
+      layer_mark_dirty(s_canvas_layer);
+    }
+    tts_push(tts_chunk_t->value->data, tts_chunk_t->length);
+    // 缓冲达到阈值后开始播放（speaker 已开也调，幂等重注册定时器防句间死锁）
+    if (s_tts_count >= TTS_START_THRESHOLD) {
+      tts_start_playback();
+    }
+    tts_reset_watchdog();  // 收到数据，重置看门狗
+  }
+
+  // TTS 结束标记：若缓冲还没开播，立即开播把剩余放完
+  Tuple *tts_end_t = dict_find(iter, MESSAGE_KEY_TTS_END);
+  if (tts_end_t) {
+    if (s_tts_count > 0) {
+      tts_start_playback();
+    }
+  }
+
+  // TTS 全部朗读结束（所有句子发完）。
+  // L1 修复：若缓冲还有未播数据，只标记 all_sent，不立即置 playing=false，
+  // 让播放定时器排空后由 close callback 置 false——避免末段 SELECT 停止失效、音频渗入下一状态。
+  // 若缓冲已空（短回复或播放赶上了），直接置 false。
+  Tuple *tts_done_t = dict_find(iter, MESSAGE_KEY_TTS_DONE);
+  if (tts_done_t) {
+    if (s_tts_watchdog_timer) {
+      app_timer_cancel(s_tts_watchdog_timer);
+      s_tts_watchdog_timer = NULL;
+    }
+    if (s_tts_count > 0) {
+      // 还有未播数据：标记等排空，保持 playing=true 让停止手势有效
+      s_tts_all_sent = true;
+    } else {
+      // 已播完：直接结束
+      s_tts_playing = false;
+      s_tts_loading = false;
+      s_tts_all_sent = false;
+      layer_mark_dirty(s_canvas_layer);
+    }
+  }
+#endif
 }
 
 static void inbox_dropped(AppMessageResult reason, void *ctx) {
@@ -1039,12 +1433,22 @@ static void outbox_sent(DictionaryIterator *iter, void *ctx) {
 
 static void outbox_failed(DictionaryIterator *iter, AppMessageResult reason, void *ctx) {
   APP_LOG(APP_LOG_LEVEL_ERROR, "Send fail: %d", (int)reason);
-  // 发送失败：如果还在等待中，回退到就绪
+  // 问答路径：发送失败回退到就绪
   if (s_state == STATE_SENDING || s_state == STATE_THINKING) {
     snprintf(s_reply_buf, sizeof(s_reply_buf), "Send failed. Try again.");
     text_layer_set_text(s_reply_layer, s_reply_buf);
     set_state(STATE_SHRINKING);
+    return;
   }
+#if defined(PBL_PLATFORM_EMERY)
+  // TTS_REQUEST 异步发送失败：清理 TTS 状态，防止 s_tts_playing 卡死导致按钮瘫痪。
+  // 利用 s_tts_playing 与问答 SENDING 状态互斥区分消息类型（TTS_REQUEST 发出时
+  // s_tts_playing=true，问答 SENDING 状态下 s_tts_playing=false），无需读 iter。
+  if (s_tts_playing) {
+    tts_stop();
+    vibes_double_pulse();
+  }
+#endif
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1058,6 +1462,13 @@ static void outbox_failed(DictionaryIterator *iter, AppMessageResult reason, voi
 // DOWN 长按：彩蛋（随机发送预设问题）
 // ═══════════════════════════════════════════════════════════════════════════════
 static void select_handler(ClickRecognizerRef r, void *ctx) {
+#if defined(PBL_PLATFORM_EMERY)
+  // TTS 播放中 → 短按 SELECT 停止朗读
+  if (s_tts_playing) {
+    tts_stop();
+    return;
+  }
+#endif
   if (s_state == STATE_IDLE_READY) {
     // C7+C8 fix: 防重复创建 + 立即切到 RECORDING 状态
     if (s_dictation_session) return;
@@ -1081,6 +1492,9 @@ static void select_long_handler(ClickRecognizerRef r, void *ctx) {
     vibes_double_pulse();
     return;
   }
+#if defined(PBL_PLATFORM_EMERY)
+  if (s_tts_playing) { tts_stop(); vibes_double_pulse(); return; }
+#endif
 
   if (s_state == STATE_IDLE_READY || s_state == STATE_RESPONSE) {
     // 保护：仅在当前已经是空白新对话时才阻止重复创建
@@ -1118,7 +1532,7 @@ static void select_long_handler(ClickRecognizerRef r, void *ctx) {
 // UP 短按：在回复状态向上滚动；其他状态打开菜单
 static void up_handler(ClickRecognizerRef r, void *ctx) {
   if (s_state == STATE_RESPONSE) {
-    s_user_scrolled = true;  // C10 fix: 用户手动滚动后停止自动跳底
+    s_user_scrolled = true;  // 用户手动滚动后停止自动滚到顶部
     GPoint offset = scroll_layer_get_content_offset(s_scroll_layer);
     offset.y += 60;
     if (offset.y > 0) offset.y = 0;
@@ -1130,13 +1544,23 @@ static void up_handler(ClickRecognizerRef r, void *ctx) {
 
 // UP 长按：始终打开菜单
 static void up_long_handler(ClickRecognizerRef r, void *ctx) {
+#if defined(PBL_PLATFORM_EMERY)
+  // 播放 TTS 时长按 UP 增加音量
+  if (s_tts_playing) {
+    s_tts_volume += 20;
+    if (s_tts_volume > 100) s_tts_volume = 100;
+    persist_write_int(PERSIST_KEY_TTS_VOLUME, s_tts_volume);
+    vibes_short_pulse();
+    return;
+  }
+#endif
   show_chat_list();
 }
 
 // DOWN 短按：回复页面向下滚动 60px，其他状态打开菜单
 static void down_handler(ClickRecognizerRef r, void *ctx) {
   if (s_state == STATE_RESPONSE) {
-    s_user_scrolled = true;  // C10 fix: 用户手动滚动后停止自动跳底
+    s_user_scrolled = true;  // 用户手动滚动后停止自动滚到顶部
     GPoint offset = scroll_layer_get_content_offset(s_scroll_layer);
     offset.y -= 60;
     scroll_layer_set_content_offset(s_scroll_layer, offset, true);
@@ -1145,8 +1569,24 @@ static void down_handler(ClickRecognizerRef r, void *ctx) {
   }
 }
 
-// DOWN 长按：彩蛋功能 —— 随机发送一个预设趣味问题给 AI（可通过设置禁用）
+// DOWN 长按：Emery 上朗读/调节音量 / 其他平台彩蛋功能
 static void down_long_handler(ClickRecognizerRef r, void *ctx) {
+#if defined(PBL_PLATFORM_EMERY)
+  // 正在播放 TTS → 减小音量
+  if (s_tts_playing) {
+    s_tts_volume -= 20;
+    if (s_tts_volume < 0) s_tts_volume = 0;
+    persist_write_int(PERSIST_KEY_TTS_VOLUME, s_tts_volume);
+    vibes_short_pulse();
+    return;
+  }
+  // 在 RESPONSE 状态 → 请求朗读当前回复
+  if (s_state == STATE_RESPONSE) {
+    tts_request();
+    return;
+  }
+#endif
+
   if (s_disable_surprise) {
     vibes_double_pulse();
     return;
@@ -1169,13 +1609,29 @@ static void down_long_handler(ClickRecognizerRef r, void *ctx) {
   const char *q = backdoor_questions[idx];
 
   snprintf(s_question_display, sizeof(s_question_display), "Surprise: %s", q);
-  
+   
+  // 读取最新健康数据（仅在用户开启时）
+  if (s_health_enabled) {
+    read_health_data();
+  } else {
+    s_step_count = -1;   // 开关关闭：哨兵值
+    s_active_minutes = -1;
+  }
+
   DictionaryIterator *iter;
   if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
     dict_write_cstring(iter, MESSAGE_KEY_QUESTION, q);
+    if (s_health_enabled) {
+      dict_write_int32(iter, MESSAGE_KEY_STEP_COUNT, s_step_count);
+      dict_write_int32(iter, MESSAGE_KEY_ACTIVE_MINUTES, s_active_minutes);
+    }
     app_message_outbox_send();
     vibes_short_pulse();
     set_state(STATE_SENDING);
+  } else {
+    // 发送失败，清空残留显示
+    s_question_display[0] = '\0';
+    set_state(STATE_IDLE_READY);
   }
 }
 
@@ -1269,11 +1725,23 @@ static void window_load(Window *window) {
   if (s_font_size > 2) s_font_size = 0;
   s_font_bold = persist_exists(PERSIST_KEY_FONT_BOLD) ? (int)persist_read_int(PERSIST_KEY_FONT_BOLD) : 0;
   s_disable_surprise = persist_exists(PERSIST_KEY_DISABLE_SURPRISE) ? (int)persist_read_int(PERSIST_KEY_DISABLE_SURPRISE) : 0;
+  s_health_enabled = persist_exists(PERSIST_KEY_HEALTH_ENABLED) ? (int)persist_read_int(PERSIST_KEY_HEALTH_ENABLED) : 0;
+  s_auto_tts = persist_exists(PERSIST_KEY_AUTO_TTS) ? (int)persist_read_int(PERSIST_KEY_AUTO_TTS) : 0;
+  s_web_search = persist_exists(PERSIST_KEY_WEB_SEARCH) ? (int)persist_read_int(PERSIST_KEY_WEB_SEARCH) : 1;
+  s_has_tts_key = persist_exists(PERSIST_KEY_HAS_TTS_KEY) ? (int)persist_read_int(PERSIST_KEY_HAS_TTS_KEY) : 0;
+#if defined(PBL_PLATFORM_EMERY)
+  s_tts_volume = persist_exists(PERSIST_KEY_TTS_VOLUME) ? (int)persist_read_int(PERSIST_KEY_TTS_VOLUME) : 100;
+  if (s_tts_volume < 0) s_tts_volume = 0;
+  if (s_tts_volume > 100) s_tts_volume = 100;
+#endif
   apply_font_settings();
   set_state(ready ? STATE_IDLE_READY : STATE_IDLE_NO_KEY);
 }
 
 static void window_unload(Window *window) {
+#if defined(PBL_PLATFORM_EMERY)
+  tts_stop();
+#endif
   layer_destroy(s_canvas_layer);
   scroll_layer_destroy(s_scroll_layer);
   text_layer_destroy(s_reply_layer);
@@ -1290,7 +1758,8 @@ static void window_appear(Window *window) {
 // 菜单结构：
 //   row 0     — 模型行（显示当前模型名，点击打开模型选择子菜单）
 //   row 1     — 「+ START NEW CHAT」按钮
-//   row 2+    — 历史对话列表（活跃对话有 Celeste 底色 + 蓝点标记）
+//   row 2     — 联网搜索开关（显示 ON/OFF，点击切换并同步给手机）
+//   row 3+    — 历史对话列表（活跃对话有 Celeste 底色 + 蓝点标记）
 //
 // 配色规则：
 //   模型行 / 新建对话：无底色，蓝字 (C_ACCENT)，高亮时 CobaltBlue 底 + 白字
@@ -1309,8 +1778,8 @@ static const char *model_short_name(const char *full) {
 }
 
 static uint16_t menu_get_num_rows(MenuLayer *menu, uint16_t section, void *ctx) {
-  // row 0 = 模型行, row 1 = 新对话, row 2+ = 对话列表
-  return 2 + s_chat_count;
+  // row 0 = 模型行, row 1 = 新对话, row 2 = 联网搜索开关, row 3+ = 对话列表
+  return 3 + s_chat_count;
 }
 
 static int16_t menu_get_cell_height(MenuLayer *menu, MenuIndex *idx, void *ctx) {
@@ -1358,8 +1827,23 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *idx
     return;
   }
 
+  if (idx->row == 2) {
+    // ── 联网搜索开关行：标签 + ON/OFF 状态 ──
+    graphics_context_set_text_color(ctx, highlighted ? GColorWhite : C_ACCENT);
+    int x_pad = PBL_IF_ROUND_ELSE(24, 10);
+    GRect label_rect = GRect(x_pad, bounds.size.h / 2 - 11, bounds.size.w - x_pad * 2 - 50, 22);
+    graphics_draw_text(ctx, "Web Search", fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+                       label_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    const char *state_str = s_web_search ? "ON" : "OFF";
+    graphics_context_set_text_color(ctx, highlighted ? GColorWhite : (s_web_search ? C_DOT_ON : C_DOT_OFF));
+    GRect state_rect = GRect(bounds.size.w - x_pad - 40, bounds.size.h / 2 - 11, 40, 22);
+    graphics_draw_text(ctx, state_str, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+                       state_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
+    return;
+  }
+
   // ── 对话列表 ──
-  int i = idx->row - 2;
+  int i = idx->row - 3;
   bool active = (i == s_active_chat_index);
 
   if (!highlighted && active) {
@@ -1391,6 +1875,12 @@ static void delayed_pop_timer(void *data) {
 }
 
 static void menu_select_click(MenuLayer *menu, MenuIndex *idx, void *ctx) {
+#if defined(PBL_PLATFORM_EMERY)
+  // 切换对话前停止 TTS（防止旧回复音频继续播放）
+  if (s_tts_playing) {
+    tts_stop();
+  }
+#endif
   if (idx->row == 0) {
     // 点击模型行 → 打开模型选择子窗口
     if (s_model_count > 0) {
@@ -1418,8 +1908,22 @@ static void menu_select_click(MenuLayer *menu, MenuIndex *idx, void *ctx) {
     return;
   }
 
+  if (idx->row == 2) {
+    // 点击联网搜索开关 → 切换并同步给手机（双路：手表改 localStorage 真值）
+    s_web_search = s_web_search ? 0 : 1;
+    persist_write_int(PERSIST_KEY_WEB_SEARCH, s_web_search);
+    vibes_short_pulse();
+    DictionaryIterator *iter;
+    if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
+      dict_write_uint8(iter, MESSAGE_KEY_SWITCH_WEB_SEARCH, (uint8_t)s_web_search);
+      app_message_outbox_send();
+    }
+    menu_layer_reload_data(s_menu_layer);
+    return;
+  }
+
   // 点击历史对话
-  int chat_idx = idx->row - 2;
+  int chat_idx = idx->row - 3;
   if (chat_idx >= s_chat_count) {
     app_timer_register(100, delayed_pop_timer, NULL);
     return;
@@ -1714,6 +2218,9 @@ static void deinit(void) {
   stop_anim();
   if (s_thinking_timeout) app_timer_cancel(s_thinking_timeout);
   if (s_dictation_session) dictation_session_destroy(s_dictation_session);
+#if defined(PBL_PLATFORM_EMERY)
+  tts_stop();
+#endif
 
   // C4 fix: 先从 window stack 移除再销毁，防止 stack 上悬空指针导致崩溃
   if (s_model_window) {
