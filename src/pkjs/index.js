@@ -540,6 +540,10 @@ var ttsSessionId = 0;         // 递增防止旧进程干扰新请求
 var ttsSentenceQueue = [];
 var ttsAudioQueue = [];
 var ttsPaused = false;        // 手表环形缓冲水位过高时发 TTS_PAUSE，置 true 暂停投递；TTS_RESUME 恢复
+// 顺序保证：并发预取时 TTS 响应可能乱序到达。用序号 + 待发 map 保证按原始句序入队。
+var ttsNextSeq = 0;           // 下一个待编码的句序号（ttsFetchNext 取走时分配）
+var ttsNextDeliver = 0;       // 下一个待投递的句序号（按序检查 pendingDeliveries）
+var ttsPendingDeliveries = {}; // seq → 编码好的 PCM 字节数组，等前序句子到齐后按序入 ttsAudioQueue
 
 // 取消 TTS：手表停止朗读时调用。递增 sessionId 断绝旧进程，
 // 清空音频/句子队列，并从 amQueue 移除所有待发的 TTS_CHUNK/TTS_END/TTS_DONE。
@@ -551,6 +555,9 @@ function cancelTTS() {
   ttsCurrentSentence = null;
   ttsCurrentOffset = 0;
   ttsPaused = false;          // 取消时清除流控暂停态，下次 startTTS 干净开始
+  ttsNextSeq = 0;
+  ttsNextDeliver = 0;
+  ttsPendingDeliveries = {};
   // 从 amQueue 移除待发的 TTS 消息。
   // 注意：若 amQueue[0] 正在发送（amSending=true），必须保留它，
   // 否则发送成功回调的 amQueue.shift() 会 shift 掉错误元素。
@@ -610,6 +617,9 @@ function startTTS() {
   ttsAudioQueue = [];
   ttsFetchingCount = 0;       // 重置并发计数
   ttsPaused = false;          // 新请求：清除上一次可能残留的流控暂停态
+  ttsNextSeq = 0;
+  ttsNextDeliver = 0;
+  ttsPendingDeliveries = {};
   // 从 amQueue 移除上一次 session 残留的 TTS chunk。
   // watch 的 tts_request() 不发 TTS_CANCEL（避免 outbox 占用），所以旧 chunk 会继续
   // 灌入新 session 的缓冲 → 音频污染。这里显式过滤。
@@ -643,13 +653,14 @@ function ttsFetchNext(ttsApiKey, sessionId) {
   ttsFetchingCount++;
 
   var sentence = ttsSentenceQueue.shift();
+  var seq = ttsNextSeq++;       // 分配句序号（并发响应可能乱序到达，靠序号保证投递顺序）
   var voice = detectTTSVoice(sentence);
 
   var url = 'https://texttospeech.googleapis.com/v1/text:synthesize?key=' + ttsApiKey;
   var xhr = new XMLHttpRequest();
   xhr.open('POST', url, true);
   xhr.setRequestHeader('Content-Type', 'application/json');
-  
+
   // 语速：config 可配（默认 1.0 正常语速），范围 0.25-4.0
   var speakingRate = parseFloat(getSetting('tts_rate', '1.0'));
   if (isNaN(speakingRate) || speakingRate < 0.25) speakingRate = 0.25;
@@ -678,7 +689,14 @@ function ttsFetchNext(ttsApiKey, sessionId) {
             pcm16.push(sample);
           }
           var pcm8Bytes = pcm16ToPcm8(pcm16);
-          ttsAudioQueue.push(pcm8Bytes);
+          // 顺序投递：存入 pending map，然后按序号顺序 flush 到 ttsAudioQueue。
+          // 这样即使句 2 的响应先于句 1 到达，也会等句 1 入队后才入队。
+          ttsPendingDeliveries[seq] = pcm8Bytes;
+          while (ttsPendingDeliveries.hasOwnProperty(ttsNextDeliver)) {
+            ttsAudioQueue.push(ttsPendingDeliveries[ttsNextDeliver]);
+            delete ttsPendingDeliveries[ttsNextDeliver];
+            ttsNextDeliver++;
+          }
         }
       } catch (e) {
         console.log('[TTS] Parse error: ' + e);

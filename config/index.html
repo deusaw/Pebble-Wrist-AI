@@ -522,16 +522,14 @@
         activeId = btn.dataset.id;
         renderChatList();
       } else if (btn.classList.contains('chat-btn-delete')) {
-        if (confirm('Delete this conversation?')) {
-          var cid = btn.dataset.id;
-          pendingDeletes.push(cid);
-          chats = chats.filter(function(c) { return c.id !== cid; });
-          delete safeMessagesMap[cid];
-          if (activeId === cid) {
-            activeId = chats.length > 0 ? chats[0].id : null;
-          }
-          renderChatList();
+        var cid = btn.dataset.id;
+        pendingDeletes.push(cid);
+        chats = chats.filter(function(c) { return c.id !== cid; });
+        delete safeMessagesMap[cid];
+        if (activeId === cid) {
+          activeId = chats.length > 0 ? chats[0].id : null;
         }
+        renderChatList();
       } else if (btn.classList.contains('chat-btn-export')) {
         // 触发导出包含完整上下问信息的 JSON 备份（单条对话极简导出设计，不提供合并导出，防止不可控文件体积）
         var cid = btn.dataset.id;
@@ -566,23 +564,46 @@
     });
 
 
-    // 删除所有对话
+    // 删除所有对话（confirm() 在 PebbleKit WebView 可能被拦截，用两次点击确认）
+    var clearAllArmed = false;
     document.getElementById('clear_all').addEventListener('click', function() {
-      if (confirm('Delete ALL conversations? This cannot be undone.')) {
+      var btn = this;
+      if (!clearAllArmed) {
+        clearAllArmed = true;
+        btn.textContent = '⚠️ Tap again to confirm';
+        btn.style.background = '#c0392b';
+        setTimeout(function() {
+          clearAllArmed = false;
+          btn.textContent = 'Delete All Conversations';
+          btn.style.background = '';
+        }, 3000);
+      } else {
         closeWith(buildSettings({ clear_all: true }));
       }
     });
 
-    // 删除 API Key
+    // 删除 API Key（两次点击确认，confirm() 在 PebbleKit WebView 可能被拦截）
+    var delKeyArmed = false;
     document.getElementById('delete_key').addEventListener('click', function() {
-      if (confirm('Delete API key?')) {
+      var btn = this;
+      if (!delKeyArmed) {
+        delKeyArmed = true;
+        btn.textContent = '⚠️ Tap again to confirm';
+        setTimeout(function() { delKeyArmed = false; btn.textContent = 'Delete API Key'; }, 3000);
+      } else {
         closeWith(buildSettings({ delete_key: true }));
       }
     });
 
     // 删除 TTS Key
+    var delTtsKeyArmed = false;
     document.getElementById('delete_tts_key').addEventListener('click', function() {
-      if (confirm('Delete TTS API key?')) {
+      var btn = this;
+      if (!delTtsKeyArmed) {
+        delTtsKeyArmed = true;
+        btn.textContent = '⚠️ Tap again to confirm';
+        setTimeout(function() { delTtsKeyArmed = false; btn.textContent = 'Delete TTS Key'; }, 3000);
+      } else {
         closeWith(buildSettings({ delete_tts_key: true }));
       }
     });

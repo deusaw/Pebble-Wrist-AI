@@ -179,19 +179,14 @@ static int32_t s_active_minutes = 0;
 #define TTS_RING_SIZE        32768  // 环形缓冲区（Emery RAM 充足，32KB 给 raw PCM 留足溢出余量）
 #define TTS_DECODE_BYTES     1600   // 每次播放的 PCM 字节数 = 200ms × 8000B/s（raw 8bit/8kHz）
 #define TTS_PLAYBACK_MS      200    // 播放定时器间隔（与 DECODE_BYTES 严格匹配：1600B/200ms=8000B/s）
-#define TTS_START_THRESHOLD  6000   // 缓冲达到此字节数后开始播放（0.75s 预缓冲，raw PCM 8000B/s）
+#define TTS_START_THRESHOLD  16000  // 开播预缓冲（2s 音频 @ 8000B/s）：蓝牙信号弱时大缓冲防 underrun
 #define TTS_CLOSE_DELAY_MS   1500   // 句间延迟关闭扬声器
 #define TTS_WATCHDOG_MS      30000  // TTS 看门狗：30s 无任何 chunk/done 则超时清理
 // 流控水位线（watch→JS 暂停/恢复）。
 // raw PCM 8000 B/s 消费，蓝牙投递 ~46k B/s（processAmQueue 15ms 串行）。
-// 不再用 JS 端 watermark 限速（那会把投递压到消费速度以下 → 缓冲单调下降 → 一字一顿），
-// 改为让 JS 全速投递，靠 watch PAUSE/RESUME 控水位。
-// 关键约束：PAUSE 发出后到 JS 停止投递有 RTT 延迟（~300-500ms），期间 amQueue 里已排队的
-// chunk 会继续到达手表。安全阀 TTS_AMQUEUE_SAFETY_LIMIT=12 + 1 在发 + 1 在途 ≈ 14×700=9800B。
-// 故 HIGH + 9800 ≤ RING_SIZE：24000 + 9800 = 33800 > 32768 ❗
-// 实际上 processAmQueue 串行发（15ms/chunk），RTT 期间最多新到 ~10 chunk，已排队的会先到达。
-// 取 HIGH=22000：22000+9800=31800 < 32768 ✓（余量 968B）。LOW=12000（1.5s 跑道）。
-// HIGH-LOW=10000B=1.25s 消费，PAUSE/RESUME 周期长，循环频率低。
+// JS 全速投递，靠 watch PAUSE/RESUME 控水位。
+// HIGH + 在途（~9800B）≤ RING_SIZE。LOW 留足蓝牙抖动跑道。
+// LOW=12000（1.5s 跑道）足以覆盖蓝牙信号波动期间的消费。
 #define TTS_PAUSE_HIGH       22000  // 缓冲≥此值 → 发 TTS_PAUSE
 #define TTS_RESUME_LOW       12000  // 缓冲≤此值 → 发 TTS_RESUME（1.5s 播放跑道防 underrun）
 
@@ -208,6 +203,11 @@ static int s_tts_volume = 100;           // 0-100
 static AppTimer *s_tts_playback_timer = NULL;
 static AppTimer *s_tts_close_timer = NULL;
 static AppTimer *s_tts_watchdog_timer = NULL;
+#endif
+
+// ── TTS 音量指示器（仅 Emery，调节音量时显示 2 秒）─────────────────────────
+#if defined(PBL_PLATFORM_EMERY)
+static AppTimer *s_tts_vol_timer = NULL;  // 音量指示器显示定时器（NULL=不显示）
 #endif
 
 #define R_BUF_SIZE 2048
@@ -537,11 +537,19 @@ static void tts_request(void) {
     vibes_double_pulse();
   }
 }
-#endif  // PBL_PLATFORM_EMERY
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// 字体设置应用
-//
+// 音量指示器：调节音量后在屏幕中央显示 2 秒 "Vol: NN%"
+static void tts_vol_indicator_callback(void *data) {
+  s_tts_vol_timer = NULL;
+  layer_mark_dirty(s_canvas_layer);
+}
+
+static void tts_show_vol_indicator(void) {
+  if (s_tts_vol_timer) app_timer_cancel(s_tts_vol_timer);
+  s_tts_vol_timer = app_timer_register(2000, tts_vol_indicator_callback, NULL);
+  layer_mark_dirty(s_canvas_layer);
+}
+#endif  // PBL_PLATFORM_EMERY
 // 根据 s_font_size 和 s_font_bold 选择回复区域和问题显示的字体，
 // 并动态调整问题显示层高度。标题行（canvas_draw 中）在调用时也需联动。
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -950,6 +958,26 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
     default:
       break;
   }
+
+#if defined(PBL_PLATFORM_EMERY)
+  // 音量指示器叠加层：调节音量后显示 2 秒，居中黑底白字
+  if (s_tts_vol_timer && s_tts_playing) {
+    static char vol_buf[16];
+    snprintf(vol_buf, sizeof(vol_buf), "Vol: %d%%", s_tts_volume);
+    GFont vol_font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
+    GSize vol_size = graphics_text_layout_get_content_size(vol_buf, vol_font, GRect(0, 0, s_width, 24), GTextOverflowModeWordWrap, GTextAlignmentCenter);
+    int box_w = vol_size.w + 20;
+    int box_h = 28;
+    int box_x = (s_width - box_w) / 2;
+    int box_y = (s_height - box_h) / 2;
+    // 黑底圆角矩形
+    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_fill_rect(ctx, GRect(box_x, box_y, box_w, box_h), 4, GCornersAll);
+    // 白字
+    graphics_context_set_text_color(ctx, GColorWhite);
+    graphics_draw_text(ctx, vol_buf, vol_font, GRect(box_x, box_y + 2, box_w, box_h - 4), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+  }
+#endif
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1610,6 +1638,7 @@ static void up_long_handler(ClickRecognizerRef r, void *ctx) {
     if (s_tts_volume > 100) s_tts_volume = 100;
     persist_write_int(PERSIST_KEY_TTS_VOLUME, s_tts_volume);
     vibes_short_pulse();
+    tts_show_vol_indicator();
     return;
   }
 #endif
@@ -1637,6 +1666,7 @@ static void down_long_handler(ClickRecognizerRef r, void *ctx) {
     if (s_tts_volume < 0) s_tts_volume = 0;
     persist_write_int(PERSIST_KEY_TTS_VOLUME, s_tts_volume);
     vibes_short_pulse();
+    tts_show_vol_indicator();
     return;
   }
   // 在 RESPONSE 状态 → 请求朗读当前回复
@@ -1800,6 +1830,7 @@ static void window_load(Window *window) {
 static void window_unload(Window *window) {
 #if defined(PBL_PLATFORM_EMERY)
   tts_stop();
+  if (s_tts_vol_timer) { app_timer_cancel(s_tts_vol_timer); s_tts_vol_timer = NULL; }
 #endif
   layer_destroy(s_canvas_layer);
   scroll_layer_destroy(s_scroll_layer);
