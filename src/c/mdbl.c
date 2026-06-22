@@ -176,20 +176,22 @@ static int32_t s_active_minutes = 0;
 
 // ── TTS 语音播放（仅 Emery 平台有扬声器）──────────────────────────
 #if defined(PBL_PLATFORM_EMERY)
-#define TTS_RING_SIZE        32768  // 环形缓冲区（Emery RAM 充足，32KB 给 raw PCM 留足溢出余量）
-#define TTS_DECODE_BYTES     1600   // 每次播放的 PCM 字节数 = 200ms × 8000B/s（raw 8bit/8kHz）
-#define TTS_PLAYBACK_MS      200    // 播放定时器间隔（与 DECODE_BYTES 严格匹配：1600B/200ms=8000B/s）
-#define TTS_START_THRESHOLD  10000  // 开播预缓冲（1.25s 音频 @ 8000B/s）：蓝牙弱时大缓冲防 underrun，须 < LOW
+// Emery 专属 TTS 参数 — 充分利用 Pebble Time 2 的 64KB RAM 和更强 CPU。
+// 调度和功耗不是问题，优先流畅度。非 Emery 平台无 TTS，不受影响。
+#define TTS_RING_SIZE        49152  // 环形缓冲 48KB（Emery 64KB RAM，其余 ~16KB 足够 app 使用）
+#define TTS_DECODE_BYTES     800    // 每次播放 100ms 音频（800B = 100ms × 8000B/s），更细粒度减少单次卡顿时长
+#define TTS_PLAYBACK_MS      100    // 播放定时器 100ms（与 DECODE_BYTES 严格匹配：800B/100ms=8000B/s）
+#define TTS_START_THRESHOLD  16000  // 开播预缓冲 2s（用户不介意等，大缓冲扛蓝牙波动），须 < LOW
 #define TTS_CLOSE_DELAY_MS   1500   // 句间延迟关闭扬声器
 #define TTS_WATCHDOG_MS      30000  // TTS 看门狗：30s 无任何 chunk/done 则超时清理
 // 流控水位线（watch→JS 暂停/恢复）。
 // raw PCM 8000 B/s 消费，蓝牙投递 ~46k B/s（processAmQueue 15ms 串行）。
 // JS 全速投递，靠 watch PAUSE/RESUME 控水位。
-// HIGH + 在途（~9800B）≤ RING_SIZE。
-// LOW=14000（1.75s 跑道）：蓝牙丢包 1.75s 内缓冲不会见底（8000×1.75=14000）。
-// HIGH-LOW=8000B=1s 消费周期，PAUSE/RESUME 频率适中。
-#define TTS_PAUSE_HIGH       22000  // 缓冲≥此值 → 发 TTS_PAUSE
-#define TTS_RESUME_LOW       14000  // 缓冲≤此值 → 发 TTS_RESUME（1.75s 播放跑道防 underrun）
+// LOW=24000（3s 跑道）：蓝牙丢包 3 秒内缓冲不会见底（8000×3=24000）。
+// HIGH=38000：HIGH + 在途（~9800B）= 47800 < 49152 ✓（余量 1352B）。
+// HIGH-LOW=14000B=1.75s 消费周期，PAUSE/RESUME 频率低。
+#define TTS_PAUSE_HIGH       38000  // 缓冲≥此值 → 发 TTS_PAUSE
+#define TTS_RESUME_LOW       24000  // 缓冲≤此值 → 发 TTS_RESUME（3s 播放跑道防 underrun）
 
 static uint8_t s_tts_ring[TTS_RING_SIZE];
 static uint32_t s_tts_head = 0;
@@ -419,10 +421,10 @@ static void tts_start_playback(void) {
   }
 }
 
-// 关键：绝不在缓冲不足一帧（1600B=200ms 音频）时做"半帧写入"。
-// 缓冲在波动时会写入 < 200ms 的音频再等 200ms → 帧间静音间隙 → 断续。
-// 满帧才写；不足一帧时 100ms 后重试等填满；仅当整句已全部到达（all_sent）
-// 时才把尾料（< 1600B）一次性冲掉。
+// 关键：绝不在缓冲不足一帧（800B=100ms 音频）时做"半帧写入"。
+// 缓冲在波动时会写入 < 100ms 的音频再等 100ms → 帧间静音间隙 → 断续。
+// 满帧才写；不足一帧时 10ms 后重试等填满；仅当整句已全部到达（all_sent）
+// 时才把尾料（< 800B）一次性冲掉。
 static void tts_playback_timer_callback(void *data) {
   s_tts_playback_timer = NULL;
   if (!s_speaker_open) return;
@@ -430,7 +432,7 @@ static void tts_playback_timer_callback(void *data) {
   static int8_t s_out_buf[TTS_DECODE_BYTES];
 
   if (s_tts_count >= TTS_DECODE_BYTES) {
-    // 满帧：1600B raw PCM = 恰好 200ms 音频，无缝衔接下一个 200ms 定时
+    // 满帧：800B raw PCM = 恰好 100ms 音频，无缝衔接下一个 100ms 定时
     for (int i = 0; i < TTS_DECODE_BYTES; i++) {
       int8_t sample = (int8_t)s_tts_ring[s_tts_head];
       s_tts_head = (s_tts_head + 1) % TTS_RING_SIZE;
@@ -454,7 +456,7 @@ static void tts_playback_timer_callback(void *data) {
   } else if (s_tts_count > 0) {
     // 缓冲不足一帧（蓝牙流控导致的瞬时回落）。
     if (s_tts_all_sent) {
-      // 整句已全部到达：这是真正的流尾，把剩余 < 1600B 一次性冲掉（末尾断续可接受）
+      // 整句已全部到达：这是真正的流尾，把剩余 < 800B 一次性冲掉（末尾断续可接受）
       int decode_count = s_tts_count;
       for (int i = 0; i < decode_count; i++) {
         int8_t sample = (int8_t)s_tts_ring[s_tts_head];
@@ -469,11 +471,10 @@ static void tts_playback_timer_callback(void *data) {
       // 缓冲已空，由 close 回调收尾
       tts_schedule_close_timer();
     } else {
-      // 还有数据在路上：20ms 后重试，不写半帧（避免静音间隙）。
-      // raw PCM 下一帧需 1600B，20ms 内消费 160B、蓝牙可达 ~1400B，多数情况下
-      // 一两次重试即可凑满一帧。100ms（ADPCM 时代值）在 raw PCM 下会引入可感
-      // 的词间停顿（100ms ≈ 一个短音节的长度）。
-      s_tts_playback_timer = app_timer_register(20, tts_playback_timer_callback, NULL);
+      // 还有数据在路上：10ms 后重试，不写半帧（避免静音间隙）。
+      // 100ms 帧长下 10ms 重试 = 帧长的 10%，Emery CPU 足够支撑。
+      // 10ms 内消费 80B、蓝牙可达 ~700B，一两次重试即可凑满一帧。
+      s_tts_playback_timer = app_timer_register(10, tts_playback_timer_callback, NULL);
       tts_schedule_close_timer();  // 兜底：若后续数据不再来，超时关闭
     }
   } else {
