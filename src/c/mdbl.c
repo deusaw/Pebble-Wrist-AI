@@ -179,8 +179,10 @@ static int32_t s_active_minutes = 0;
 // 长文本开播后缓冲会快速填满，到 HIGH 通知 JS 暂停、到 LOW 通知 JS 恢复。
 // LOW 必须留足"RESUME 往返期间"的播放跑道：8000B/s 消费，LOW=8000 → 1 秒跑道，
 // 足以覆盖 RESUME 发出→JS 响应→chunk 到达的 RTT（~200-500ms）。
-// HIGH-LOW 之差需大于在途数据量（amQueue watermark=3 约束在途 ≤ ~2800B）。
-#define TTS_PAUSE_HIGH       12000  // 缓冲≥此值 → 发 TTS_PAUSE（留 4384B 余量到溢出，吸收在途 chunk）
+// HIGH 尽量高以拉长 PAUSE/RESUME 周期、减少循环频率，但需为在途 chunk 留余量：
+// amQueue watermark=3 + 1 个在发 + 1 个在途 ≈ 5×700=3500B，故 HIGH ≤ 16384-3500≈12800。
+// HIGH-LOW=5000B=0.625s 消费，周期足够长避免频繁循环导致的间歇卡顿。
+#define TTS_PAUSE_HIGH       12500  // 缓冲≥此值 → 发 TTS_PAUSE（留 ~3884B 余量到溢出，吸收在途 chunk）
 #define TTS_RESUME_LOW       8000   // 缓冲≤此值 → 发 TTS_RESUME（1s 播放跑道防 underrun）
 
 static uint8_t s_tts_ring[TTS_RING_SIZE];
@@ -428,8 +430,11 @@ static void tts_playback_timer_callback(void *data) {
       // 缓冲已空，由 close 回调收尾
       tts_schedule_close_timer();
     } else {
-      // 还有数据在路上：100ms 后重试，不写半帧（避免静音间隙）
-      s_tts_playback_timer = app_timer_register(100, tts_playback_timer_callback, NULL);
+      // 还有数据在路上：20ms 后重试，不写半帧（避免静音间隙）。
+      // raw PCM 下一帧需 1600B，20ms 内消费 160B、蓝牙可达 ~1400B，多数情况下
+      // 一两次重试即可凑满一帧。100ms（ADPCM 时代值）在 raw PCM 下会引入可感
+      // 的词间停顿（100ms ≈ 一个短音节的长度）。
+      s_tts_playback_timer = app_timer_register(20, tts_playback_timer_callback, NULL);
       tts_schedule_close_timer();  // 兜底：若后续数据不再来，超时关闭
     }
   } else {
