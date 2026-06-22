@@ -274,13 +274,14 @@ static void update_response_text(void) {
 // ═══════════════════════════════════════════════════════════════════════════════
 static void read_health_data(void) {
 #if defined(PBL_HEALTH)
-  // 显式区分 HEALTH_VALUE_UNAVAILABLE（数据不可用）与合法值（含 0）。
+  // 区分数据不可用与合法值（含 0）。
+  // health_service_sum_today 不可用时返回负值（time_t -1），合法 0 是正常零值。
   // 不可用 → 发 -1 哨兵，JS 端据此不注入；合法 0 → 正常发 0，JS 端注入。
   HealthValue steps = health_service_sum_today(HealthMetricStepCount);
-  s_step_count = (steps == HEALTH_VALUE_UNAVAILABLE) ? -1 : (int32_t)steps;
+  s_step_count = (steps < 0) ? -1 : (int32_t)steps;
 
   HealthValue active_sec = health_service_sum_today(HealthMetricActiveSeconds);
-  s_active_minutes = (active_sec == HEALTH_VALUE_UNAVAILABLE) ? -1 : (int32_t)((active_sec + 30) / 60);
+  s_active_minutes = (active_sec < 0) ? -1 : (int32_t)((active_sec + 30) / 60);
 #else
   s_step_count = -1;   // 无健康 API 的平台：哨兵值，JS 端不注入
   s_active_minutes = -1;
@@ -360,6 +361,8 @@ static void tts_schedule_close_timer(void) {
   tts_cancel_close_timer();
   s_tts_close_timer = app_timer_register(TTS_CLOSE_DELAY_MS, tts_delayed_close_callback, NULL);
 }
+
+static void tts_stop(void);  // 前向声明：看门狗回调在 tts_stop 定义之前调用它
 
 // TTS 看门狗：防止 TTS_DONE/STATUS 被蓝牙丢弃导致 playing/loading 永久卡死
 static void tts_watchdog_callback(void *data) {
