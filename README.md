@@ -20,11 +20,10 @@ Works with OpenRouter (GPT, Claude, Gemini, Gemma, Llama, Qwen, and more) or you
 - **Conversation Export** — Export any conversation as a structured JSON file (with messages, timestamps, and model info) from the config page.
 - **Font Size & Bold** — Choose from three text sizes (Normal / Large / Extra Large) and toggle bold text for better readability on your wrist.
 - **"Surprise Me" Toggle** — Long-press DOWN for a random prompt, or disable it in settings if you prefer to avoid accidental triggers.
-- **Text-to-Speech (Emery only)** — Long-press DOWN on a reply to have it read aloud via Google Cloud TTS, with automatic Chinese/English voice detection. Adjustable volume. *Beta.*
+- **Text-to-Speech (Emery only)** — Long-press DOWN on a reply to have it read aloud via Google Cloud TTS, with automatic Chinese/English voice detection. Adjustable volume and speaking rate. Raw 8-bit PCM streaming with watch-side flow control for smooth long-form playback. *Beta.*
 - **Health Context** — Optionally include your daily step count and active minutes in the AI's context. Off by default. *Beta.*
-- **Location Context** — Optionally include your approximate GPS location in the AI's context. Off by default. *Beta.*
+- **Location Context** — Optionally include your approximate GPS location (reverse-geocoded to city name) in the AI's context. Off by default. *Beta.*
 - **Web Search** — Optionally let models search the web for up-to-date information (OpenRouter only, on by default). Toggle from the config page or right from the watch menu. *Beta.*
-- **Auto Read Aloud (Emery only)** — Optionally have every AI reply read aloud automatically when it arrives. Off by default. *Beta.*
 - **Cross-Platform** — Supports all Pebble hardware including Pebble Time Round (Chalk) with fully optimized centered layouts.
 - **Serverless & Private** — Your phone talks directly to the API. Conversations are stored locally on your phone's localStorage. Nothing leaves your device except the API request itself — and the optional Health/Location toggles, which are off by default and only include that data in the request when you enable them.
 - **Dark-Themed Config Page** — A modern settings interface inside the Pebble companion app for API keys, system prompts, model lists, and conversation management.
@@ -98,21 +97,22 @@ Accessible via UP or DOWN button:
 | `src/pkjs/index.js` | JavaScript (ES5) | API calls, conversation storage, config, chunked Bluetooth transfer |
 | `config/index.html` | HTML/CSS/JS | Settings page (hosted on GitHub Pages) |
 
-The watch communicates with the phone over Bluetooth using Pebble's AppMessage protocol. Long responses are chunked into ~256-byte segments and reassembled on the watch. The entire codebase is two files: ~1,700 lines of C and ~750 lines of JS.
+The watch communicates with the phone over Bluetooth using Pebble's AppMessage protocol. Long responses are chunked into ~256-byte segments and reassembled on the watch. TTS audio is streamed as raw 8-bit PCM chunks with watch→phone flow control (PAUSE/RESUME watermarks) to prevent ring-buffer overflow. The entire codebase is two files: ~2,100 lines of C and ~1,130 lines of JS.
 
 ---
 
 ## Version History
 
 ### v1.3.0
-- **Text-to-Speech** — Read AI replies aloud on Emery (Google Cloud TTS, auto Chinese/English). Long-press DOWN to read; long-press UP/DOWN to adjust volume; short-press SELECT to stop. *Beta.*
-- **Auto Read Aloud** — Optionally read every reply automatically (Emery only). *Beta.*
+- **Text-to-Speech** — Read AI replies aloud on Emery (Google Cloud TTS, auto Chinese/English). Long-press DOWN to read; long-press UP/DOWN to adjust volume; short-press SELECT to stop. Configurable speaking rate. Raw 8-bit PCM streaming with watch→phone flow control (PAUSE/RESUME) and a 2-sentence prefetch pipeline for smooth long-form playback. *Beta.*
 - **Health Context** — Optional toggle to include daily steps and active minutes in AI context. Off by default. *Beta.*
-- **Location Context** — Optional toggle to include approximate GPS in AI context. Off by default. *Beta.*
+- **Location Context** — Optional toggle to include approximate GPS (reverse-geocoded to city name) in AI context. Off by default. *Beta.*
 - **Web Search** — Optional toggle to let models search the web for current information (OpenRouter only, on by default). Configurable from the config page or the watch menu. *Beta.*
 - **Reply starts at top** — Replies now scroll to the top so you read from the beginning, instead of jumping to the bottom.
-- **Bug fixes** — Fixed TTS error messages corrupting AI replies and freezing buttons; removed the "Voice" API mode trap that hid the API key field; cleaned up residual "Surprise" display when sending fails; aligned TTS audio length with on-screen text length; rounded active minutes (<60s no longer counts as 0); added TTS loading indicator.
-- **Pre-release hardening** — Declared `health` capability (health data was silently failing without it); added TTS cancel protocol so Stop actually stops; added TTS backpressure to prevent long replies from turning into noise; TTS HTTP/network errors now surface to the user; Auto TTS no longer fires when no TTS key is set; TTS watchdog prevents permanent button freeze if a message is dropped; health data now correctly reports legitimate zero values; TTS playback stays controllable until audio fully drains.
+- **Speaking rate** — Adjustable TTS speed (0.75× / 1.0× / 1.25× / 1.5×) from the config page.
+- **Bug fixes** — Fixed TTS error messages corrupting AI replies and freezing buttons; removed the "Voice" API mode trap that hid the API key field; cleaned up residual "Surprise" display when sending fails; aligned TTS audio length with on-screen text length; rounded active minutes (<60s no longer counts as 0); added TTS loading indicator; fixed `atob` not available in PebbleKit JS; fixed TTS request failing when outbox was busy.
+- **Pre-release hardening** — Declared `health` capability (health data was silently failing without it); added TTS cancel protocol so Stop actually stops; TTS HTTP/network errors now surface to the user; TTS watchdog prevents permanent button freeze if a message is dropped; health data now correctly reports legitimate zero values; TTS playback stays controllable until audio fully drains.
+- **TTS audio engine overhaul** (7 iterations of real-device tuning) — Eliminated background noise and hoarseness by replacing 4-bit ADPCM compression with raw 8-bit PCM; eliminated long-text garbling via watch→phone ring-buffer flow control (PAUSE/RESUME watermarks with a 32KB buffer); eliminated word-level stutter via full-frame-only playback, 20ms sub-frame retry, 2-concurrent-sentence prefetch pipeline, and removal of JS-side delivery throttling. Reference implementation: [Pebble_Gemini](https://github.com/ericlmccormick/Pebble_Gemini).
 
 ### v1.2.0
 - **Font size settings** — Choose Normal, Large, or Extra Large text in the config page
@@ -127,7 +127,7 @@ The watch communicates with the phone over Bluetooth using Pebble's AppMessage p
 - Dictation language is determined by the phone-side Rebble voice service; the app cannot set it. Display of non-Latin scripts depends on the watch's installed language pack.
 - Text only — no images or emoji rendering on Pebble's display
 - Conversation content is not persisted on the watch after restart (full history lives on the phone)
-- TTS is Emery-only (the only Pebble with a speaker). On severe Bluetooth jitter, a dropped audio chunk may corrupt the rest of that sentence's audio.
+- TTS is Emery-only (the only Pebble with a speaker). Audio is streamed as raw 8-bit PCM with watch-side flow control; on extreme Bluetooth jitter, minor word-level chop may still occur. 8-bit quantization imposes a ~50dB SNR ceiling (mild background hiss at low volumes).
 - **Currently unable to test microphone/dictation features** due to lack of a physical device. If you encounter any issues, please [open an issue on GitHub](https://github.com/deusaw/Pebble-Wrist-AI/issues).
 
 ---
