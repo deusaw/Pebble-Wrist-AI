@@ -176,22 +176,25 @@ static int32_t s_active_minutes = 0;
 
 // ── TTS 语音播放（仅 Emery 平台有扬声器）──────────────────────────
 #if defined(PBL_PLATFORM_EMERY)
-// Emery 专属 TTS 参数 — 充分利用 Pebble Time 2 的 64KB RAM 和更强 CPU。
+// Emery 专属 TTS 参数 — 充分利用 Pebble Time 2 的更强 CPU。
 // 调度和功耗不是问题，优先流畅度。非 Emery 平台无 TTS，不受影响。
-#define TTS_RING_SIZE        49152  // 环形缓冲 48KB（Emery 64KB RAM，其余 ~16KB 足够 app 使用）
+// 内存约束：app 虚拟大小 ≤ 65535（uint16 上限）。basalt 基础 RAM ~18KB，
+// Emery 额外 BSS ≈ ring + 900B，故 ring ≤ 65535 - 18000 - 900 ≈ 46635。
+// 取 40KB（40960）留 ~5.7KB 安全余量。
+#define TTS_RING_SIZE        40960  // 环形缓冲 40KB（受 app 虚拟大小 65535 上限约束）
 #define TTS_DECODE_BYTES     800    // 每次播放 100ms 音频（800B = 100ms × 8000B/s），更细粒度减少单次卡顿时长
 #define TTS_PLAYBACK_MS      100    // 播放定时器 100ms（与 DECODE_BYTES 严格匹配：800B/100ms=8000B/s）
-#define TTS_START_THRESHOLD  16000  // 开播预缓冲 2s（用户不介意等，大缓冲扛蓝牙波动），须 < LOW
+#define TTS_START_THRESHOLD  12000  // 开播预缓冲 1.5s（用户不介意等，大缓冲扛蓝牙波动），须 < LOW
 #define TTS_CLOSE_DELAY_MS   1500   // 句间延迟关闭扬声器
 #define TTS_WATCHDOG_MS      30000  // TTS 看门狗：30s 无任何 chunk/done 则超时清理
 // 流控水位线（watch→JS 暂停/恢复）。
 // raw PCM 8000 B/s 消费，蓝牙投递 ~46k B/s（processAmQueue 15ms 串行）。
 // JS 全速投递，靠 watch PAUSE/RESUME 控水位。
-// LOW=24000（3s 跑道）：蓝牙丢包 3 秒内缓冲不会见底（8000×3=24000）。
-// HIGH=38000：HIGH + 在途（~9800B）= 47800 < 49152 ✓（余量 1352B）。
-// HIGH-LOW=14000B=1.75s 消费周期，PAUSE/RESUME 频率低。
-#define TTS_PAUSE_HIGH       38000  // 缓冲≥此值 → 发 TTS_PAUSE
-#define TTS_RESUME_LOW       24000  // 缓冲≤此值 → 发 TTS_RESUME（3s 播放跑道防 underrun）
+// LOW=20000（2.5s 跑道）：蓝牙丢包 2.5 秒内缓冲不会见底（8000×2.5=20000）。
+// HIGH=30000：HIGH + 在途（~9800B）= 39800 < 40960 ✓（余量 1160B）。
+// HIGH-LOW=10000B=1.25s 消费周期，PAUSE/RESUME 频率适中。
+#define TTS_PAUSE_HIGH       30000  // 缓冲≥此值 → 发 TTS_PAUSE
+#define TTS_RESUME_LOW       20000  // 缓冲≤此值 → 发 TTS_RESUME（2.5s 播放跑道防 underrun）
 
 static uint8_t s_tts_ring[TTS_RING_SIZE];
 static uint32_t s_tts_head = 0;
