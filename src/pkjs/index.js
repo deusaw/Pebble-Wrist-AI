@@ -233,7 +233,15 @@ function sendReadyStatus() {
     var ttsApiKey = getSetting('tts_api_key', '');
     var hasTtsKey = (ttsApiKey && ttsApiKey.trim().length > 0) ? 1 : 0;
     console.log('[Settings] autoTts=' + autoTts + ' hasTtsKey=' + hasTtsKey + ' healthEnabled=' + healthEnabled + ' webSearch=' + webSearch);
-    sendToWatch({ 'FONT_SIZE': fontSize, 'FONT_BOLD': fontBold, 'DISABLE_SURPRISE': disableSurprise, 'HEALTH_ENABLED': healthEnabled, 'AUTO_TTS': autoTts, 'WEB_SEARCH_ENABLED': webSearch, 'HAS_TTS_KEY': hasTtsKey });
+    // 拆成两条消息避免单条超限：显示设置 + TTS 设置分开
+    sendToWatch({ 'FONT_SIZE': fontSize, 'FONT_BOLD': fontBold, 'DISABLE_SURPRISE': disableSurprise, 'HEALTH_ENABLED': healthEnabled, 'WEB_SEARCH_ENABLED': webSearch });
+  }, 200);
+  // TTS 相关设置单独发，确保 auto_tts 和 has_tts_key 到达手表
+  setTimeout(function() {
+    var autoTts = parseInt(getSetting('auto_tts', '0'), 10);
+    var ttsApiKey = getSetting('tts_api_key', '');
+    var hasTtsKey = (ttsApiKey && ttsApiKey.trim().length > 0) ? 1 : 0;
+    sendToWatch({ 'AUTO_TTS': autoTts, 'HAS_TTS_KEY': hasTtsKey });
   }, 200);
   setTimeout(sendChatList, 400);  // 稍长间隔确保 READY_STATUS 先到
   setTimeout(sendModelList, 800); // 再发模型列表
@@ -743,8 +751,8 @@ function ttsFetchNext(ttsApiKey, sessionId) {
 // LOOP 2：从音频队列取 ADPCM 数据 → 分块入 amQueue 串行发送
 // 背压：逐 chunk 控制，每次只 push 一个 700B chunk，检查 amQueue 水位后重新调度。
 // 避免一次性把整句（可能数十 KB）灌入 amQueue → 手表 16KB 环形缓冲溢出 → ADPCM 失步后半段变噪声。
-var TTS_AMQUEUE_WATERMARK = 4;   // amQueue 里待发 TTS chunk 上限（约 2.8KB ≈ 0.35s 音频）
-var TTS_CHUNK_SIZE = 700;
+var TTS_AMQUEUE_WATERMARK = 8;   // amQueue 里待发 TTS chunk 上限
+var TTS_CHUNK_SIZE = 200;        // 小 chunk 避免超 AppMessage 单条限制，提高蓝牙吞吐
 var ttsCurrentSentence = null;   // 正在分块发送的句子（字节组）
 var ttsCurrentOffset = 0;        // 当前句子已发送到的字节偏移
 
@@ -776,7 +784,7 @@ function ttsSendNext(sessionId) {
     sendToWatch({ 'TTS_CHUNK': chunk });
     ttsCurrentOffset = end;
     // 短延迟后继续发下一个 chunk（让背压检查生效）
-    setTimeout(function() { ttsSendNext(sessionId); }, 10);
+    setTimeout(function() { ttsSendNext(sessionId); }, 5);
     return;
   }
 
