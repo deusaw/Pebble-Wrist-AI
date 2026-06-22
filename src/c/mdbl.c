@@ -169,17 +169,17 @@ static int32_t s_active_minutes = 0;
 // ── TTS 语音播放（仅 Emery 平台有扬声器）──────────────────────────
 #if defined(PBL_PLATFORM_EMERY)
 #define TTS_RING_SIZE        16384  // 环形缓冲区（Emery RAM 充足）
-#define TTS_DECODE_BYTES     800    // 每次解码的 ADPCM 字节数
-#define TTS_PLAYBACK_MS      200    // 播放定时器间隔
-#define TTS_START_THRESHOLD  3000   // 缓冲达到此字节数后开始播放
+#define TTS_DECODE_BYTES     1600   // 每次播放的 PCM 字节数 = 200ms × 8000B/s（raw 8bit/8kHz）
+#define TTS_PLAYBACK_MS      200    // 播放定时器间隔（与 DECODE_BYTES 严格匹配：1600B/200ms=8000B/s）
+#define TTS_START_THRESHOLD  3000   // 缓冲达到此字节数后开始播放（~0.375s 预缓冲）
 #define TTS_CLOSE_DELAY_MS   1500   // 句间延迟关闭扬声器
 #define TTS_WATCHDOG_MS      30000  // TTS 看门狗：30s 无任何 chunk/done 则超时清理
 // 流控水位线（watch→JS 暂停/恢复）。
-// 蓝牙到达速度（~700B/15-30ms）远超手表消费（4000B/s），长文本开播后缓冲会在 3-4 秒内填满，
-// 之后 tts_push 静默丢字节 → ADPCM 失步 → 后半段变噪声。
-// 到 HIGH 通知 JS 暂停，到 LOW 通知 JS 恢复。HIGH/LOW 之差需大于蓝牙往返期间的在途数据量。
-#define TTS_PAUSE_HIGH       12000  // 缓冲≥此值 → 发 TTS_PAUSE（留 4096B≈1s 余量到溢出）
-#define TTS_RESUME_LOW       4000   // 缓冲≤此值 → 发 TTS_RESUME（留 1s 播放余量防 underrun）
+// 蓝牙到达速度（~700B/15-30ms ≈ 23k+ B/s）远超手表消费（8000B/s raw PCM），
+// 长文本开播后缓冲会快速填满，到 HIGH 通知 JS 暂停、到 LOW 通知 JS 恢复。
+// HIGH/LOW 之差需大于蓝牙往返期间在途数据量（受 amQueue watermark=3 约束，在途 ≤ ~2100B）。
+#define TTS_PAUSE_HIGH       12000  // 缓冲≥此值 → 发 TTS_PAUSE（留 4384B 余量到溢出，吸收在途 chunk）
+#define TTS_RESUME_LOW       4000   // 缓冲≤此值 → 发 TTS_RESUME（留 0.5s 播放余量防 underrun）
 
 static uint8_t s_tts_ring[TTS_RING_SIZE];
 static uint32_t s_tts_head = 0;
@@ -194,27 +194,6 @@ static int s_tts_volume = 100;           // 0-100
 static AppTimer *s_tts_playback_timer = NULL;
 static AppTimer *s_tts_close_timer = NULL;
 static AppTimer *s_tts_watchdog_timer = NULL;
-
-// IMA ADPCM 解码状态
-static int32_t s_adpcm_valpred = 0;
-static int32_t s_adpcm_index = 0;
-
-// IMA ADPCM 标准量化表（公开规范 IMA/DVI ADPCM）
-static const int16_t s_adpcm_step_table[89] = {
-  7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,
-  34,37,41,45,50,55,60,66,73,80,88,97,107,118,
-  130,143,157,173,190,209,230,253,279,307,337,
-  371,408,449,494,544,598,658,724,796,876,963,
-  1060,1166,1282,1411,1552,1707,1878,2066,2272,
-  2499,2749,3024,3327,3660,4026,4428,4871,5358,
-  5894,6484,7132,7845,8630,9493,10442,11487,
-  12635,13899,15289,16818,18500,20350,22385,
-  24623,27086,29794,32767
-};
-static const int8_t s_adpcm_index_table[16] = {
-  -1,-1,-1,-1,2,4,6,8,
-  -1,-1,-1,-1,2,4,6,8
-};
 #endif
 
 #define R_BUF_SIZE 2048
@@ -294,45 +273,12 @@ static void read_health_data(void) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // TTS 语音播放（仅 Emery 平台）
 //
-// 手机端把 AI 回复经 Google TTS → IMA ADPCM 编码 → 分块发来。
-// 手表端：收 ADPCM → 环形缓冲 → 定时解码为 8bit PCM → speaker_stream_write 播放。
+// 手机端把 AI 回复经 Google TTS (8kHz 16-bit) → 取高 8 位转 raw 8bit PCM → 分块发来。
+// 手表端：收 raw PCM → 环形缓冲 → 定时音量缩放 → speaker_stream_write 播放。
+// 不再使用 ADPCM 压缩：4bit ADPCM 量化噪声大（底噪）且瞬态跟随差（沙哑），
+// raw 8bit PCM 8000B/s 在蓝牙带宽（23k+ B/s）和流控范围内，音质显著提升。
 // ═══════════════════════════════════════════════════════════════════════════════
 #if defined(PBL_PLATFORM_EMERY)
-static void tts_reset_adpcm(void) {
-  s_adpcm_valpred = 0;
-  s_adpcm_index = 0;
-}
-
-// 解码单个 4bit ADPCM nibble 为 8bit PCM（含音量缩放）
-static int8_t tts_decode_nibble(uint8_t delta) {
-  int32_t step = s_adpcm_step_table[s_adpcm_index];
-  int32_t vpdiff = step >> 3;
-
-  if (delta & 4) vpdiff += step;
-  if (delta & 2) vpdiff += (step >> 1);
-  if (delta & 1) vpdiff += (step >> 2);
-
-  if (delta & 8) {
-    s_adpcm_valpred -= vpdiff;
-  } else {
-    s_adpcm_valpred += vpdiff;
-  }
-
-  if (s_adpcm_valpred > 32767) s_adpcm_valpred = 32767;
-  if (s_adpcm_valpred < -32768) s_adpcm_valpred = -32768;
-
-  s_adpcm_index += s_adpcm_index_table[delta];
-  if (s_adpcm_index < 0) s_adpcm_index = 0;
-  if (s_adpcm_index > 88) s_adpcm_index = 88;
-
-  // 音量缩放（整数运算，0-100）后取高 8 位
-  int32_t scaled = (s_adpcm_valpred * s_tts_volume) / 100;
-  int16_t pcm8 = scaled >> 8;
-  if (pcm8 > 127) pcm8 = 127;
-  if (pcm8 < -128) pcm8 = -128;
-  return (int8_t)pcm8;
-}
-
 static void tts_cancel_close_timer(void) {
   if (s_tts_close_timer) {
     app_timer_cancel(s_tts_close_timer);
@@ -394,7 +340,7 @@ static void tts_send_flow_control(bool pause) {
   }
 }
 
-// 把收到的 ADPCM 字节推入环形缓冲
+// 把收到的 raw PCM 字节推入环形缓冲
 static void tts_push(const uint8_t *data, uint16_t len) {
   for (uint16_t i = 0; i < len; i++) {
     if (s_tts_count < TTS_RING_SIZE) {
@@ -430,29 +376,29 @@ static void tts_start_playback(void) {
   }
 }
 
-// 关键：绝不在缓冲不足一帧（800B=200ms 音频）时做"半帧写入"。
-// 之前实现是 decode_count = min(count, 800)，缓冲在 200~800B 波动时会写入
-// 100~175ms 的音频再等 200ms → 每帧之间出现 25~100ms 静音间隙 → 长文本后半段断续。
-// Pebble_Gemini 的做法是：缓冲不足一帧时不写入，100ms 后重试等填满；仅当整句
-// 已全部到达（all_sent）时才把尾料（< 800B）一次性冲掉。
+// 关键：绝不在缓冲不足一帧（1600B=200ms 音频）时做"半帧写入"。
+// 缓冲在波动时会写入 < 200ms 的音频再等 200ms → 帧间静音间隙 → 断续。
+// 满帧才写；不足一帧时 100ms 后重试等填满；仅当整句已全部到达（all_sent）
+// 时才把尾料（< 1600B）一次性冲掉。
 static void tts_playback_timer_callback(void *data) {
   s_tts_playback_timer = NULL;
   if (!s_speaker_open) return;
 
-  static int8_t s_out_buf[TTS_DECODE_BYTES * 2];
+  static int8_t s_out_buf[TTS_DECODE_BYTES];
 
   if (s_tts_count >= TTS_DECODE_BYTES) {
-    // 满帧：解码 800B → 1600 样本，恰好 200ms 音频，无缝衔接下一个 200ms 定时
+    // 满帧：1600B raw PCM = 恰好 200ms 音频，无缝衔接下一个 200ms 定时
     for (int i = 0; i < TTS_DECODE_BYTES; i++) {
-      uint8_t b = s_tts_ring[s_tts_head];
+      int8_t sample = (int8_t)s_tts_ring[s_tts_head];
       s_tts_head = (s_tts_head + 1) % TTS_RING_SIZE;
       s_tts_count--;
-      uint8_t n1 = (b >> 4) & 0x0F;
-      uint8_t n2 = b & 0x0F;
-      s_out_buf[i * 2]     = tts_decode_nibble(n1);
-      s_out_buf[i * 2 + 1] = tts_decode_nibble(n2);
+      // 音量缩放（整数运算，0-100）
+      int32_t scaled = (sample * s_tts_volume) / 100;
+      if (scaled > 127) scaled = 127;
+      if (scaled < -128) scaled = -128;
+      s_out_buf[i] = (int8_t)scaled;
     }
-    speaker_stream_write((uint8_t *)s_out_buf, TTS_DECODE_BYTES * 2);
+    speaker_stream_write((uint8_t *)s_out_buf, TTS_DECODE_BYTES);
     s_tts_playback_timer = app_timer_register(TTS_PLAYBACK_MS, tts_playback_timer_callback, NULL);
 
     // 流控恢复：消费一帧后缓冲已降到 LOW 以下 → 通知 JS 继续投递。
@@ -465,18 +411,18 @@ static void tts_playback_timer_callback(void *data) {
   } else if (s_tts_count > 0) {
     // 缓冲不足一帧（蓝牙流控导致的瞬时回落）。
     if (s_tts_all_sent) {
-      // 整句已全部到达：这是真正的流尾，把剩余 < 800B 一次性冲掉（末尾断续可接受）
+      // 整句已全部到达：这是真正的流尾，把剩余 < 1600B 一次性冲掉（末尾断续可接受）
       int decode_count = s_tts_count;
       for (int i = 0; i < decode_count; i++) {
-        uint8_t b = s_tts_ring[s_tts_head];
+        int8_t sample = (int8_t)s_tts_ring[s_tts_head];
         s_tts_head = (s_tts_head + 1) % TTS_RING_SIZE;
         s_tts_count--;
-        uint8_t n1 = (b >> 4) & 0x0F;
-        uint8_t n2 = b & 0x0F;
-        s_out_buf[i * 2]     = tts_decode_nibble(n1);
-        s_out_buf[i * 2 + 1] = tts_decode_nibble(n2);
+        int32_t scaled = (sample * s_tts_volume) / 100;
+        if (scaled > 127) scaled = 127;
+        if (scaled < -128) scaled = -128;
+        s_out_buf[i] = (int8_t)scaled;
       }
-      speaker_stream_write((uint8_t *)s_out_buf, decode_count * 2);
+      speaker_stream_write((uint8_t *)s_out_buf, decode_count);
       // 缓冲已空，由 close 回调收尾
       tts_schedule_close_timer();
     } else {
@@ -511,7 +457,6 @@ static void tts_stop(void) {
     app_timer_cancel(s_tts_watchdog_timer);
     s_tts_watchdog_timer = NULL;
   }
-  tts_reset_adpcm();
   // 注意：不发 TTS_CANCEL。tts_stop 只清本地状态。
   // 需要通知 JS 停止发送时由调用方调 tts_cancel_remote()，
   // 避免 tts_request 里 tts_stop 占用 outbox 导致 TTS_REQUEST 发送失败。
@@ -530,7 +475,6 @@ static void tts_cancel_remote(void) {
 // 向手机请求朗读当前回复
 static void tts_request(void) {
   tts_stop();          // 清掉旧状态（不发 TTS_CANCEL，避免占用 outbox）
-  tts_reset_adpcm();
   s_tts_playing = true;
   s_tts_loading = true;
   layer_mark_dirty(s_canvas_layer);  // 立即显示 "Reading..." 提示
@@ -1405,7 +1349,7 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   }
 
 #if defined(PBL_PLATFORM_EMERY)
-  // TTS 音频分块（ADPCM 字节）
+  // TTS 音频分块（raw 8bit PCM 字节）
   Tuple *tts_chunk_t = dict_find(iter, MESSAGE_KEY_TTS_CHUNK);
   if (tts_chunk_t) {
     s_tts_playing = true;

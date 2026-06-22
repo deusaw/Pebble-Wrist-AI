@@ -160,7 +160,7 @@ function processAmQueue() {
   amSending = true;
 
   var item = amQueue[0];
-  // TTS 音频包丢一个就毁后半句（ADPCM 状态连续），给更多重试机会
+  // TTS 音频包丢一个会产生音频缺口（raw PCM 无状态，但缺口仍造成卡顿），给更多重试机会
   var maxRetries = (typeof item.payload['TTS_CHUNK'] !== 'undefined') ? 8 : 3;
   Pebble.sendAppMessage(
     item.payload,
@@ -479,10 +479,10 @@ function askAI(question, contextText, onFinish) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// TTS 语音朗读（Google Cloud TTS → ADPCM 编码 → 分块蓝牙传输）
+// TTS 语音朗读（Google Cloud TTS → raw 8bit PCM → 分块蓝牙传输）
 //
-// 流程：收到 TTS_REQUEST → 取当前回复文本 → 按句切分 → 逐句调 TTS → ADPCM 编码
-// → 分块发往手表 → 手表端环形缓冲解码播放
+// 流程：收到 TTS_REQUEST → 取当前回复文本 → 按句切分 → 逐句调 TTS → 取高 8 位转 raw PCM
+// → 分块发往手表 → 手表端环形缓冲 + 音量缩放播放
 //
 // 语言自动检测：回复含中文字符即用 cmn-CN 语音，否则用 en-US。
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -512,63 +512,23 @@ function atobLocal(b64) {
   return str;
 }
 
-// IMA ADPCM 编码表（公开规范）
-var adpcmStepTable = [7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,337,371,408,449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,27086,29794,32767];
-var adpcmIndexTable = [-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8];
-var jsAdpcmValpred = 0;
-var jsAdpcmIndex = 0;
-
-function resetAdpcmState() {
-  jsAdpcmValpred = 0;
-  jsAdpcmIndex = 0;
-}
-
-// IMA ADPCM 编码：16bit PCM → 4bit ADPCM 字节数组
-function encodeADPCM(pcm16) {
-  var adpcm = [];
-  var buffer = 0;
-  var toggle = false;
+// 16bit PCM → 8bit PCM（取高 8 位，带 1-LSB 抖动消除截断失真）。
+// Google TTS 返回 LINEAR16（16-bit 小端），扬声器要 8-bit。
+// 直接 >>8 截断会引入谐波失真（尤其在低音量段落，量化误差与信号相关），
+// 加 ±1 LSB 抖动把量化噪声"白化"成更不易察觉的背景嘶嘶声，吐词更清晰。
+// 字节格式：输出 unsigned 0..255，手表端 (int8_t) 强转回有符号（标准二进制补码往返）。
+function pcm16ToPcm8(pcm16) {
+  var pcm8 = [];
+  var ditherToggle = false;
   for (var i = 0; i < pcm16.length; i++) {
-    var diff = pcm16[i] - jsAdpcmValpred;
-    var sign = (diff < 0) ? 8 : 0;
-    if (sign) diff = -diff;
-    var step = adpcmStepTable[jsAdpcmIndex];
-    var delta = 0;
-    var vpdiff = (step >> 3);
-    if (diff >= step) { delta |= 4; diff -= step; vpdiff += step; }
-    step >>= 1;
-    if (diff >= step) { delta |= 2; diff -= step; vpdiff += step; }
-    step >>= 1;
-    if (diff >= step) { delta |= 1; vpdiff += step; }
-    if (sign) jsAdpcmValpred -= vpdiff;
-    else jsAdpcmValpred += vpdiff;
-    if (jsAdpcmValpred > 32767) jsAdpcmValpred = 32767;
-    if (jsAdpcmValpred < -32768) jsAdpcmValpred = -32768;
-    delta |= sign;
-    jsAdpcmIndex += adpcmIndexTable[delta];
-    if (jsAdpcmIndex < 0) jsAdpcmIndex = 0;
-    if (jsAdpcmIndex > 88) jsAdpcmIndex = 88;
-    if (toggle) {
-      buffer |= (delta & 0x0F);
-      adpcm.push(buffer);
-      toggle = false;
-    } else {
-      buffer = (delta & 0x0F) << 4;
-      toggle = true;
-    }
+    // 双电平抖动（±1 LSB）：奇偶样本分别加 +1/-1 LSB（16bit 域 = ±256）
+    ditherToggle = !ditherToggle;
+    var dithered = pcm16[i] + (ditherToggle ? 256 : -256);
+    if (dithered > 32767) dithered = 32767;
+    if (dithered < -32768) dithered = -32768;
+    pcm8.push((dithered >> 8) & 0xFF);  // 取高 8 位为 unsigned 0..255
   }
-  if (toggle) adpcm.push(buffer);
-  return adpcm;
-}
-
-// 低通滤波（3 点均值，减少压缩噪音）
-function lowPassFilter(samples) {
-  if (samples.length < 2) return samples;
-  var filtered = [samples[0], samples[1]];
-  for (var i = 2; i < samples.length; i++) {
-    filtered[i] = Math.round((samples[i] + samples[i - 1] + samples[i - 2]) / 3);
-  }
-  return filtered;
+  return pcm8;
 }
 
 // 检测文本语言：含中文字符返回中文语音，否则返回英文语音
@@ -655,13 +615,12 @@ function startTTS() {
   ttsAudioQueue = [];
   ttsIsFetching = false;
   ttsPaused = false;          // 新请求：清除上一次可能残留的流控暂停态
-  resetAdpcmState();
 
   ttsFetchNext(ttsApiKey, thisSession);
   ttsSendNext(thisSession);
 }
 
-// LOOP 1：逐句调 Google TTS → 编码为 ADPCM → 推入音频队列
+// LOOP 1：逐句调 Google TTS → 转 raw 8bit PCM → 推入音频队列
 function ttsFetchNext(ttsApiKey, sessionId) {
   if (ttsIsFetching || ttsSentenceQueue.length === 0) return;
   if (sessionId !== ttsSessionId) return;  // 旧 session，停止
@@ -694,7 +653,7 @@ function ttsFetchNext(ttsApiKey, sessionId) {
         if (data.audioContent) {
           var decoded = atobLocal(data.audioContent);
           var pcm16 = [];
-          // 跳过 WAV 头（44 字节）
+          // 跳过 WAV 头（44 字节），LINEAR16 为小端 16-bit 采样
           for (var i = 44; i < decoded.length; i += 2) {
             var lo = decoded.charCodeAt(i);
             var hi = decoded.charCodeAt(i + 1);
@@ -702,9 +661,8 @@ function ttsFetchNext(ttsApiKey, sessionId) {
             if (sample > 32767) sample -= 65536;
             pcm16.push(sample);
           }
-          pcm16 = lowPassFilter(pcm16);
-          var adpcmBytes = encodeADPCM(pcm16);
-          ttsAudioQueue.push(adpcmBytes);
+          var pcm8Bytes = pcm16ToPcm8(pcm16);
+          ttsAudioQueue.push(pcm8Bytes);
         }
       } catch (e) {
         console.log('[TTS] Parse error: ' + e);
@@ -740,11 +698,12 @@ function ttsFetchNext(ttsApiKey, sessionId) {
   xhr.send(safeJsonStringify(body));
 }
 
-// LOOP 2：从音频队列取 ADPCM 数据 → 分块入 amQueue 串行发送
+// LOOP 2：从音频队列取 raw PCM 数据 → 分块入 amQueue 串行发送
 // 背压：逐 chunk 控制，每次只 push 一个 700B chunk，检查 amQueue 水位后重新调度。
-// 避免一次性把整句（可能数十 KB）灌入 amQueue → 手表 16KB 环形缓冲溢出 → ADPCM 失步后半段变噪声。
+// 避免一次性把整句（可能数十 KB）灌入 amQueue → 手表 16KB 环形缓冲溢出。
+// 注：溢出本身由 watch→JS 流控（TTS_PAUSE/RESUME）根治，这里 watermark 是第二道保险。
 var TTS_AMQUEUE_WATERMARK = 3;   // amQueue 里待发 TTS chunk 上限（保守，确保不溢出 16KB 缓冲）
-var TTS_CHUNK_SIZE = 700;        // 恢复初版能工作的 chunk size
+var TTS_CHUNK_SIZE = 700;        // chunk 大小（raw PCM 下不变，蓝牙单包 ~124B data 槽足够）
 var ttsCurrentSentence = null;   // 正在分块发送的句子（字节组）
 var ttsCurrentOffset = 0;        // 当前句子已发送到的字节偏移
 
@@ -760,7 +719,7 @@ function ttsSendNext(sessionId) {
   if (sessionId !== ttsSessionId) return;  // 旧 session，停止
 
   // 手表流控：缓冲水位过高时发来 TTS_PAUSE，停止投递新 chunk。
-  // 已在 amQueue 里或正在发的 chunk 会自然发完（不截断半句，否则 ADPCM 失步）。
+  // 已在 amQueue 里或正在发的 chunk 会自然发完（不截断半句，避免音频缺口）。
   // 此处 return 直接退出，不挂 setTimeout——由 TTS_RESUME 处理器调 ttsSendNext 唤醒。
   if (ttsPaused) return;
 
