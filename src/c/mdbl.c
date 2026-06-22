@@ -410,15 +410,20 @@ static void tts_start_playback(void) {
   }
 }
 
+// 关键：绝不在缓冲不足一帧（800B=200ms 音频）时做"半帧写入"。
+// 之前实现是 decode_count = min(count, 800)，缓冲在 200~800B 波动时会写入
+// 100~175ms 的音频再等 200ms → 每帧之间出现 25~100ms 静音间隙 → 长文本后半段断续。
+// Pebble_Gemini 的做法是：缓冲不足一帧时不写入，100ms 后重试等填满；仅当整句
+// 已全部到达（all_sent）时才把尾料（< 800B）一次性冲掉。
 static void tts_playback_timer_callback(void *data) {
   s_tts_playback_timer = NULL;
   if (!s_speaker_open) return;
 
   static int8_t s_out_buf[TTS_DECODE_BYTES * 2];
 
-  int decode_count = (s_tts_count >= TTS_DECODE_BYTES) ? TTS_DECODE_BYTES : s_tts_count;
-  if (decode_count > 0) {
-    for (int i = 0; i < decode_count; i++) {
+  if (s_tts_count >= TTS_DECODE_BYTES) {
+    // 满帧：解码 800B → 1600 样本，恰好 200ms 音频，无缝衔接下一个 200ms 定时
+    for (int i = 0; i < TTS_DECODE_BYTES; i++) {
       uint8_t b = s_tts_ring[s_tts_head];
       s_tts_head = (s_tts_head + 1) % TTS_RING_SIZE;
       s_tts_count--;
@@ -427,8 +432,31 @@ static void tts_playback_timer_callback(void *data) {
       s_out_buf[i * 2]     = tts_decode_nibble(n1);
       s_out_buf[i * 2 + 1] = tts_decode_nibble(n2);
     }
-    speaker_stream_write((uint8_t *)s_out_buf, decode_count * 2);
+    speaker_stream_write((uint8_t *)s_out_buf, TTS_DECODE_BYTES * 2);
     s_tts_playback_timer = app_timer_register(TTS_PLAYBACK_MS, tts_playback_timer_callback, NULL);
+
+  } else if (s_tts_count > 0) {
+    // 缓冲不足一帧（蓝牙流控导致的瞬时回落）。
+    if (s_tts_all_sent) {
+      // 整句已全部到达：这是真正的流尾，把剩余 < 800B 一次性冲掉（末尾断续可接受）
+      int decode_count = s_tts_count;
+      for (int i = 0; i < decode_count; i++) {
+        uint8_t b = s_tts_ring[s_tts_head];
+        s_tts_head = (s_tts_head + 1) % TTS_RING_SIZE;
+        s_tts_count--;
+        uint8_t n1 = (b >> 4) & 0x0F;
+        uint8_t n2 = b & 0x0F;
+        s_out_buf[i * 2]     = tts_decode_nibble(n1);
+        s_out_buf[i * 2 + 1] = tts_decode_nibble(n2);
+      }
+      speaker_stream_write((uint8_t *)s_out_buf, decode_count * 2);
+      // 缓冲已空，由 close 回调收尾
+      tts_schedule_close_timer();
+    } else {
+      // 还有数据在路上：100ms 后重试，不写半帧（避免静音间隙）
+      s_tts_playback_timer = app_timer_register(100, tts_playback_timer_callback, NULL);
+      tts_schedule_close_timer();  // 兜底：若后续数据不再来，超时关闭
+    }
   } else {
     // 缓冲空，安排延迟关闭
     tts_schedule_close_timer();
@@ -1429,6 +1457,10 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     if (s_tts_count > 0) {
       // 还有未播数据：标记等排空，保持 playing=true 让停止手势有效
       s_tts_all_sent = true;
+      // 关键：唤醒播放定时器。新逻辑下缓冲不足一帧时不写半帧、靠 100ms 重试等数据；
+      // 若此刻定时器未在跑（例如末句短、从未达到 3000B 开播阈值，或上一个 TTS_END 被丢），
+      // 仅置 all_sent 不会触发播放，尾料会卡在缓冲里。这里显式开播兜底。
+      tts_start_playback();
     } else {
       // 已播完：直接结束
       s_tts_playing = false;
