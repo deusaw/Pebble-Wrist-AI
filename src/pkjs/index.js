@@ -703,11 +703,14 @@ function ttsFetchNext(ttsApiKey, sessionId) {
 }
 
 // LOOP 2：从音频队列取 raw PCM 数据 → 分块入 amQueue 串行发送
-// 背压：逐 chunk 控制，每次只 push 一个 700B chunk，检查 amQueue 水位后重新调度。
-// 避免一次性把整句（可能数十 KB）灌入 amQueue → 手表 16KB 环形缓冲溢出。
-// 注：溢出本身由 watch→JS 流控（TTS_PAUSE/RESUME）根治，这里 watermark 是第二道保险。
-var TTS_AMQUEUE_WATERMARK = 3;   // amQueue 里待发 TTS chunk 上限（保守，确保不溢出 16KB 缓冲）
-var TTS_CHUNK_SIZE = 700;        // chunk 大小（raw PCM 下不变，蓝牙单包 ~124B data 槽足够）
+// 投递速度由 processAmQueue 的 15ms 串行间隔自然限速（~46k B/s），远超手表消费（8000 B/s），
+// 缓冲会填满 → watch 发 TTS_PAUSE → 停止投递。溢出由流控根治，无需 JS 端 watermark 限速。
+// 之前的 watermark=3 + 300ms 等待会把平均投递速度压到 ~5800 B/s < 消费 8000 B/s，
+// 导致稳态缓冲单调下降见底 → 一字一顿。现已移除该限速。
+// 保留一个高水位安全阀（防 amQueue 在 PAUSE 往返延迟期间无限堆积），但设得很高、等待很短，
+// 正常流程下不会触发。
+var TTS_AMQUEUE_SAFETY_LIMIT = 12; // amQueue 待发 TTS chunk 安全上限（防 PAUSE 往返期间无限堆积）
+var TTS_CHUNK_SIZE = 700;        // chunk 大小（蓝牙单包 data 槽足够）
 var ttsCurrentSentence = null;   // 正在分块发送的句子（字节组）
 var ttsCurrentOffset = 0;        // 当前句子已发送到的字节偏移
 
@@ -727,9 +730,11 @@ function ttsSendNext(sessionId) {
   // 此处 return 直接退出，不挂 setTimeout——由 TTS_RESUME 处理器调 ttsSendNext 唤醒。
   if (ttsPaused) return;
 
-  // 背压：amQueue 待发 chunk 超水位则等消化
-  if (ttsPendingChunkCount() >= TTS_AMQUEUE_WATERMARK) {
-    setTimeout(function() { ttsSendNext(sessionId); }, 300);
+  // 安全阀：amQueue 堆积过多（PAUSE 往返延迟期间可能堆积）时短暂等待，
+  // 让 processAmQueue 消化。正常流程下 PAUSE 会在缓冲到 HIGH 时及时触发，
+  // 不会堆积到此上限。等待时间短（30ms）避免成为限速瓶颈。
+  if (ttsPendingChunkCount() >= TTS_AMQUEUE_SAFETY_LIMIT) {
+    setTimeout(function() { ttsSendNext(sessionId); }, 30);
     return;
   }
 

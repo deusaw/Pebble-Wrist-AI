@@ -168,22 +168,24 @@ static int32_t s_active_minutes = 0;
 
 // ── TTS 语音播放（仅 Emery 平台有扬声器）──────────────────────────
 #if defined(PBL_PLATFORM_EMERY)
-#define TTS_RING_SIZE        16384  // 环形缓冲区（Emery RAM 充足）
+#define TTS_RING_SIZE        32768  // 环形缓冲区（Emery RAM 充足，32KB 给 raw PCM 留足溢出余量）
 #define TTS_DECODE_BYTES     1600   // 每次播放的 PCM 字节数 = 200ms × 8000B/s（raw 8bit/8kHz）
 #define TTS_PLAYBACK_MS      200    // 播放定时器间隔（与 DECODE_BYTES 严格匹配：1600B/200ms=8000B/s）
 #define TTS_START_THRESHOLD  6000   // 缓冲达到此字节数后开始播放（0.75s 预缓冲，raw PCM 8000B/s）
 #define TTS_CLOSE_DELAY_MS   1500   // 句间延迟关闭扬声器
 #define TTS_WATCHDOG_MS      30000  // TTS 看门狗：30s 无任何 chunk/done 则超时清理
 // 流控水位线（watch→JS 暂停/恢复）。
-// 蓝牙到达速度（~700B/15-30ms ≈ 23k+ B/s）远超手表消费（8000B/s raw PCM），
-// 长文本开播后缓冲会快速填满，到 HIGH 通知 JS 暂停、到 LOW 通知 JS 恢复。
-// LOW 必须留足"RESUME 往返期间"的播放跑道：8000B/s 消费，LOW=8000 → 1 秒跑道，
-// 足以覆盖 RESUME 发出→JS 响应→chunk 到达的 RTT（~200-500ms）。
-// HIGH 尽量高以拉长 PAUSE/RESUME 周期、减少循环频率，但需为在途 chunk 留余量：
-// amQueue watermark=3 + 1 个在发 + 1 个在途 ≈ 5×700=3500B，故 HIGH ≤ 16384-3500≈12800。
-// HIGH-LOW=5000B=0.625s 消费，周期足够长避免频繁循环导致的间歇卡顿。
-#define TTS_PAUSE_HIGH       12500  // 缓冲≥此值 → 发 TTS_PAUSE（留 ~3884B 余量到溢出，吸收在途 chunk）
-#define TTS_RESUME_LOW       8000   // 缓冲≤此值 → 发 TTS_RESUME（1s 播放跑道防 underrun）
+// raw PCM 8000 B/s 消费，蓝牙投递 ~46k B/s（processAmQueue 15ms 串行）。
+// 不再用 JS 端 watermark 限速（那会把投递压到消费速度以下 → 缓冲单调下降 → 一字一顿），
+// 改为让 JS 全速投递，靠 watch PAUSE/RESUME 控水位。
+// 关键约束：PAUSE 发出后到 JS 停止投递有 RTT 延迟（~300-500ms），期间 amQueue 里已排队的
+// chunk 会继续到达手表。安全阀 TTS_AMQUEUE_SAFETY_LIMIT=12 + 1 在发 + 1 在途 ≈ 14×700=9800B。
+// 故 HIGH + 9800 ≤ RING_SIZE：24000 + 9800 = 33800 > 32768 ❗
+// 实际上 processAmQueue 串行发（15ms/chunk），RTT 期间最多新到 ~10 chunk，已排队的会先到达。
+// 取 HIGH=22000：22000+9800=31800 < 32768 ✓（余量 968B）。LOW=12000（1.5s 跑道）。
+// HIGH-LOW=10000B=1.25s 消费，PAUSE/RESUME 周期长，循环频率低。
+#define TTS_PAUSE_HIGH       22000  // 缓冲≥此值 → 发 TTS_PAUSE
+#define TTS_RESUME_LOW       12000  // 缓冲≤此值 → 发 TTS_RESUME（1.5s 播放跑道防 underrun）
 
 static uint8_t s_tts_ring[TTS_RING_SIZE];
 static uint32_t s_tts_head = 0;
