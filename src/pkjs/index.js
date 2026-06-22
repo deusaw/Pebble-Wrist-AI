@@ -228,20 +228,9 @@ function sendReadyStatus() {
     var fontBold = parseInt(getSetting('font_bold', '0'), 10);
     var disableSurprise = parseInt(getSetting('disable_surprise', '0'), 10);
     var healthEnabled = parseInt(getSetting('health_enabled', '0'), 10);
-    var autoTts = parseInt(getSetting('auto_tts', '0'), 10);
     var webSearch = parseInt(getSetting('web_search_enabled', '1'), 10);
-    var ttsApiKey = getSetting('tts_api_key', '');
-    var hasTtsKey = (ttsApiKey && ttsApiKey.trim().length > 0) ? 1 : 0;
-    console.log('[Settings] autoTts=' + autoTts + ' hasTtsKey=' + hasTtsKey + ' healthEnabled=' + healthEnabled + ' webSearch=' + webSearch);
-    // 拆成两条消息避免单条超限：显示设置 + TTS 设置分开
+    console.log('[Settings] healthEnabled=' + healthEnabled + ' webSearch=' + webSearch);
     sendToWatch({ 'FONT_SIZE': fontSize, 'FONT_BOLD': fontBold, 'DISABLE_SURPRISE': disableSurprise, 'HEALTH_ENABLED': healthEnabled, 'WEB_SEARCH_ENABLED': webSearch });
-  }, 200);
-  // TTS 相关设置单独发，确保 auto_tts 和 has_tts_key 到达手表
-  setTimeout(function() {
-    var autoTts = parseInt(getSetting('auto_tts', '0'), 10);
-    var ttsApiKey = getSetting('tts_api_key', '');
-    var hasTtsKey = (ttsApiKey && ttsApiKey.trim().length > 0) ? 1 : 0;
-    sendToWatch({ 'AUTO_TTS': autoTts, 'HAS_TTS_KEY': hasTtsKey });
   }, 200);
   setTimeout(sendChatList, 400);  // 稍长间隔确保 READY_STATUS 先到
   setTimeout(sendModelList, 800); // 再发模型列表
@@ -595,6 +584,7 @@ var ttsSessionId = 0;         // 递增防止旧进程干扰新请求
 var ttsIsFetching = false;
 var ttsSentenceQueue = [];
 var ttsAudioQueue = [];
+var ttsPaused = false;        // 手表环形缓冲水位过高时发 TTS_PAUSE，置 true 暂停投递；TTS_RESUME 恢复
 
 // 取消 TTS：手表停止朗读时调用。递增 sessionId 断绝旧进程，
 // 清空音频/句子队列，并从 amQueue 移除所有待发的 TTS_CHUNK/TTS_END/TTS_DONE。
@@ -605,6 +595,7 @@ function cancelTTS() {
   ttsSentenceQueue = [];
   ttsCurrentSentence = null;
   ttsCurrentOffset = 0;
+  ttsPaused = false;          // 取消时清除流控暂停态，下次 startTTS 干净开始
   // 从 amQueue 移除待发的 TTS 消息。
   // 注意：若 amQueue[0] 正在发送（amSending=true），必须保留它，
   // 否则发送成功回调的 amQueue.shift() 会 shift 掉错误元素。
@@ -663,6 +654,7 @@ function startTTS() {
   // 清空残留队列，防止旧 session 残留数据混入
   ttsAudioQueue = [];
   ttsIsFetching = false;
+  ttsPaused = false;          // 新请求：清除上一次可能残留的流控暂停态
   resetAdpcmState();
 
   ttsFetchNext(ttsApiKey, thisSession);
@@ -766,6 +758,11 @@ function ttsPendingChunkCount() {
 
 function ttsSendNext(sessionId) {
   if (sessionId !== ttsSessionId) return;  // 旧 session，停止
+
+  // 手表流控：缓冲水位过高时发来 TTS_PAUSE，停止投递新 chunk。
+  // 已在 amQueue 里或正在发的 chunk 会自然发完（不截断半句，否则 ADPCM 失步）。
+  // 此处 return 直接退出，不挂 setTimeout——由 TTS_RESUME 处理器调 ttsSendNext 唤醒。
+  if (ttsPaused) return;
 
   // 背压：amQueue 待发 chunk 超水位则等消化
   if (ttsPendingChunkCount() >= TTS_AMQUEUE_WATERMARK) {
@@ -900,6 +897,19 @@ Pebble.addEventListener('appmessage', function(e) {
   // ── TTS 朗读请求 ──
   if (typeof e.payload['TTS_REQUEST'] !== 'undefined') {
     startTTS();
+    return;
+  }
+
+  // ── TTS 流控（手表环形缓冲水位信号）──
+  // PAUSE：手表缓冲接近溢出，停止投递新 chunk；RESUME：缓冲已排空到安全线，继续投递。
+  if (typeof e.payload['TTS_PAUSE'] !== 'undefined') {
+    ttsPaused = true;
+    return;
+  }
+  if (typeof e.payload['TTS_RESUME'] !== 'undefined') {
+    ttsPaused = false;
+    // 唤醒被 ttsPaused 挡住的发送循环（暂停时是 return 退出，无 setTimeout 在等）。
+    ttsSendNext(ttsSessionId);
     return;
   }
 
@@ -1056,7 +1066,6 @@ Pebble.addEventListener('showConfiguration', function() {
     + '&location_enabled=' + encodeURIComponent(getSetting('location_enabled', '0'))
     + '&web_search_enabled=' + encodeURIComponent(getSetting('web_search_enabled', '1'))
     + '&health_enabled=' + encodeURIComponent(getSetting('health_enabled', '0'))
-    + '&auto_tts=' + encodeURIComponent(getSetting('auto_tts', '0'))
     + '&has_tts_key=' + (getSetting('tts_api_key', '') ? '1' : '0')
     + '&tts_rate=' + encodeURIComponent(getSetting('tts_rate', '1.0'))
     + '#export_data=' + encodeURIComponent(JSON.stringify(safeDocs));
@@ -1123,9 +1132,6 @@ Pebble.addEventListener('webviewclosed', function(e) {
     }
     if (typeof settings.health_enabled !== 'undefined') {
       localStorage.setItem('health_enabled', String(settings.health_enabled));
-    }
-    if (typeof settings.auto_tts !== 'undefined') {
-      localStorage.setItem('auto_tts', String(settings.auto_tts));
     }
     if (settings.tts_api_key && settings.tts_api_key.trim().length > 0) {
       localStorage.setItem('tts_api_key', settings.tts_api_key.trim());

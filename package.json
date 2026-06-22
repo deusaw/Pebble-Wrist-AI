@@ -39,15 +39,15 @@
       "STEP_COUNT",
       "ACTIVE_MINUTES",
       "HEALTH_ENABLED",
-      "AUTO_TTS",
-      "HAS_TTS_KEY",
       "WEB_SEARCH_ENABLED",
       "SWITCH_WEB_SEARCH",
       "TTS_REQUEST",
       "TTS_CHUNK",
       "TTS_END",
       "TTS_DONE",
-      "TTS_CANCEL"
+      "TTS_CANCEL",
+      "TTS_PAUSE",
+      "TTS_RESUME"
     ],
     "resources": {
       "media": [

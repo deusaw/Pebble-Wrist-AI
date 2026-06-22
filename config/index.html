@@ -223,18 +223,6 @@
     <div class="beta-hint">⚠️ This feature is part of v1.3.0 (beta).</div>
   </div>
 
-  <div class="field">
-    <div class="toggle-row">
-      <span class="toggle-label">Auto Read Replies Aloud <span class="beta-badge">Beta</span></span>
-      <label class="toggle-switch">
-        <input type="checkbox" id="auto_tts">
-        <span class="toggle-slider"></span>
-      </label>
-    </div>
-    <div class="hint">Automatically read AI replies aloud when they arrive (Emery only). Requires a Google TTS key above.</div>
-    <div class="beta-hint">⚠️ This feature is part of v1.3.0 (beta).</div>
-  </div>
-
   <button class="btn btn-primary" id="save">Save Settings</button>
 
   <div class="divider"></div>
@@ -298,7 +286,6 @@
     var locationEnabled = getParam('location_enabled') === '1';
     var webSearchEnabled = (getParam('web_search_enabled') || '1') === '1';
     var healthEnabled = getParam('health_enabled') === '1';
-    var autoTts = getParam('auto_tts') === '1';
 
     function applyApiMode(mode) {
       apiMode = mode;
@@ -356,7 +343,6 @@
     document.getElementById('location_enabled').checked = locationEnabled;
     document.getElementById('web_search_enabled').checked = webSearchEnabled;
     document.getElementById('health_enabled').checked = healthEnabled;
-    document.getElementById('auto_tts').checked = autoTts;
 
     // TTS key 状态
     var hasTtsKey = getParam('has_tts_key') === '1';
@@ -490,7 +476,6 @@
         location_enabled: document.getElementById('location_enabled').checked ? 1 : 0,
         web_search_enabled: document.getElementById('web_search_enabled').checked ? 1 : 0,
         health_enabled: document.getElementById('health_enabled').checked ? 1 : 0,
-        auto_tts: document.getElementById('auto_tts').checked ? 1 : 0,
         tts_rate: document.getElementById('tts_rate').value
       };
       var key = document.getElementById('api_key').value.trim();

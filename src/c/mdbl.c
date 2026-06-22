@@ -152,19 +152,15 @@ static MenuLayer *s_model_menu_layer;
 #define PERSIST_KEY_DISABLE_SURPRISE 4  // 禁用彩蛋: 0=启用, 1=禁用
 #define PERSIST_KEY_TTS_VOLUME       5  // TTS 音量: 0-100
 #define PERSIST_KEY_HEALTH_ENABLED   6  // 健康数据开关: 0=关闭, 1=开启
-#define PERSIST_KEY_AUTO_TTS         7  // 自动朗读: 0=关闭, 1=开启
 #define PERSIST_KEY_WEB_SEARCH       8  // 联网搜索: 0=关闭, 1=开启
-#define PERSIST_KEY_HAS_TTS_KEY      9  // 是否已配 TTS key: 0=否, 1=是（抑制无 key 时的空震动）
+// 注意：key 7 (曾为 AUTO_TTS) 和 key 9 (曾为 HAS_TTS_KEY) 已废弃，不复用以免旧值干扰。
 
 // ── 字体设置 ──────────────────────────────────────────────────────────────────
 static int s_font_size = 0;       // 0=Normal, 1=Large, 2=Extra Large
 static int s_font_bold = 0;       // 0=不加粗, 1=加粗
 static int s_disable_surprise = 0; // 0=启用彩蛋, 1=禁用彩蛋
 static int s_health_enabled = 0;  // 0=不发健康数据, 1=发健康数据
-static int s_auto_tts = 0;        // 0=不自动朗读, 1=收到回复自动朗读（仅 Emery）
 static int s_web_search = 1;      // 0=不联网搜索, 1=联网搜索（默认开，仅 OpenRouter 生效，由 JS 端判断）
-static int s_has_tts_key = 0;     // 0=未配 TTS key, 1=已配（抑制无 key 时的空震动/空朗读）
-static int s_auto_tts_pending = 0; // 回复到达后等待动画完成再触发 TTS（仅 Emery）
 
 // ── 健康数据（随 QUESTION 一起发送）───────────────────────────────
 static int32_t s_step_count = 0;
@@ -178,6 +174,12 @@ static int32_t s_active_minutes = 0;
 #define TTS_START_THRESHOLD  3000   // 缓冲达到此字节数后开始播放
 #define TTS_CLOSE_DELAY_MS   1500   // 句间延迟关闭扬声器
 #define TTS_WATCHDOG_MS      30000  // TTS 看门狗：30s 无任何 chunk/done 则超时清理
+// 流控水位线（watch→JS 暂停/恢复）。
+// 蓝牙到达速度（~700B/15-30ms）远超手表消费（4000B/s），长文本开播后缓冲会在 3-4 秒内填满，
+// 之后 tts_push 静默丢字节 → ADPCM 失步 → 后半段变噪声。
+// 到 HIGH 通知 JS 暂停，到 LOW 通知 JS 恢复。HIGH/LOW 之差需大于蓝牙往返期间的在途数据量。
+#define TTS_PAUSE_HIGH       12000  // 缓冲≥此值 → 发 TTS_PAUSE（留 4096B≈1s 余量到溢出）
+#define TTS_RESUME_LOW       4000   // 缓冲≤此值 → 发 TTS_RESUME（留 1s 播放余量防 underrun）
 
 static uint8_t s_tts_ring[TTS_RING_SIZE];
 static uint32_t s_tts_head = 0;
@@ -186,6 +188,7 @@ static uint32_t s_tts_count = 0;
 static bool s_tts_playing = false;       // 是否正在播放（含缓冲中）
 static bool s_tts_loading = false;       // TTS 已请求、等待首个音频块期间
 static bool s_tts_all_sent = false;      // JS 已发完所有数据（TTS_DONE 到达），等缓冲排空后置 playing=false
+static bool s_tts_paused = false;        // 已向 JS 发出 TTS_PAUSE、等待缓冲排空到 LOW 再 RESUME
 static bool s_speaker_open = false;
 static int s_tts_volume = 100;           // 0-100
 static AppTimer *s_tts_playback_timer = NULL;
@@ -381,6 +384,16 @@ static void tts_reset_watchdog(void) {
   s_tts_watchdog_timer = app_timer_register(TTS_WATCHDOG_MS, tts_watchdog_callback, NULL);
 }
 
+// 向 JS 发送流控信号（PAUSE/RESUME）。outbox 单槽，但这是 watch→JS 方向，
+// 与 JS→watch 的 TTS chunk（走 inbox）不竞争同一槽，不会卡住数据流。
+static void tts_send_flow_control(bool pause) {
+  DictionaryIterator *iter;
+  if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
+    dict_write_uint8(iter, pause ? MESSAGE_KEY_TTS_PAUSE : MESSAGE_KEY_TTS_RESUME, 1);
+    app_message_outbox_send();
+  }
+}
+
 // 把收到的 ADPCM 字节推入环形缓冲
 static void tts_push(const uint8_t *data, uint16_t len) {
   for (uint16_t i = 0; i < len; i++) {
@@ -391,6 +404,13 @@ static void tts_push(const uint8_t *data, uint16_t len) {
     }
   }
   tts_cancel_close_timer();
+
+  // 流控：缓冲水位检查。放在数据进入时（而非播放消费时）反应更快，
+  // 在溢出发生前就通知 JS 停止投递。
+  if (s_tts_count >= TTS_PAUSE_HIGH && !s_tts_paused) {
+    s_tts_paused = true;
+    tts_send_flow_control(true);
+  }
 }
 
 static void tts_playback_timer_callback(void *data);
@@ -434,6 +454,13 @@ static void tts_playback_timer_callback(void *data) {
     }
     speaker_stream_write((uint8_t *)s_out_buf, TTS_DECODE_BYTES * 2);
     s_tts_playback_timer = app_timer_register(TTS_PLAYBACK_MS, tts_playback_timer_callback, NULL);
+
+    // 流控恢复：消费一帧后缓冲已降到 LOW 以下 → 通知 JS 继续投递。
+    // 放这里（而非 tts_push）是因为 RESUME 取决于消费进度，只有播放定时器知道。
+    if (s_tts_paused && s_tts_count <= TTS_RESUME_LOW) {
+      s_tts_paused = false;
+      tts_send_flow_control(false);
+    }
 
   } else if (s_tts_count > 0) {
     // 缓冲不足一帧（蓝牙流控导致的瞬时回落）。
@@ -479,7 +506,7 @@ static void tts_stop(void) {
   s_tts_playing = false;
   s_tts_loading = false;
   s_tts_all_sent = false;
-  s_auto_tts_pending = 0;
+  s_tts_paused = false;       // 重置流控状态：停止时不再处于暂停态
   if (s_tts_watchdog_timer) {
     app_timer_cancel(s_tts_watchdog_timer);
     s_tts_watchdog_timer = NULL;
@@ -1175,14 +1202,6 @@ static void set_state(AppState new_state) {
       }
       s_user_scrolled = false;
       update_response_text();
-#if defined(PBL_PLATFORM_EMERY)
-      // 自动朗读：动画完成后触发 TTS
-      if (s_auto_tts_pending) {
-        APP_LOG(APP_LOG_LEVEL_INFO, "[AutoTTS] triggering tts_request");
-        s_auto_tts_pending = 0;
-        tts_request();
-      }
-#endif
       break;
 
     default:
@@ -1306,20 +1325,6 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     persist_write_int(PERSIST_KEY_HEALTH_ENABLED, s_health_enabled);
   }
 
-  // 自动朗读开关 (0=关闭, 1=开启，仅 Emery 生效)
-  Tuple *auto_tts_t = dict_find(iter, MESSAGE_KEY_AUTO_TTS);
-  if (auto_tts_t) {
-    s_auto_tts = auto_tts_t->value->uint8 ? 1 : 0;
-    persist_write_int(PERSIST_KEY_AUTO_TTS, s_auto_tts);
-  }
-
-  // TTS key 状态 (0=未配, 1=已配) — 用于抑制无 key 时的 Auto TTS 空震动
-  Tuple *has_tts_key_t = dict_find(iter, MESSAGE_KEY_HAS_TTS_KEY);
-  if (has_tts_key_t) {
-    s_has_tts_key = has_tts_key_t->value->uint8 ? 1 : 0;
-    persist_write_int(PERSIST_KEY_HAS_TTS_KEY, s_has_tts_key);
-  }
-
   // 联网搜索开关 (0=关闭, 1=开启，默认开，仅 OpenRouter 生效由 JS 端判断)
   Tuple *web_search_t = dict_find(iter, MESSAGE_KEY_WEB_SEARCH_ENABLED);
   if (web_search_t) {
@@ -1359,31 +1364,12 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   } else if (reply_end_t) {
     if (s_state == STATE_THINKING || s_state == STATE_SENDING) {
       set_state(STATE_SHRINKING);
-#if defined(PBL_PLATFORM_EMERY)
-      // 自动朗读：仅新问答路径（SHRINKING→RESPONSE）才标记待触发。
-      // 需已配 TTS key，否则每条回复会空震动一次（JS 预检失败静默）。
-      APP_LOG(APP_LOG_LEVEL_INFO, "[AutoTTS] reply_end: auto_tts=%d has_tts_key=%d reply_len=%d",
-              s_auto_tts, s_has_tts_key, (int)strlen(s_reply_buf));
-      if (s_auto_tts && s_has_tts_key && s_reply_buf[0] != '\0') {
-        s_auto_tts_pending = 1;
-        APP_LOG(APP_LOG_LEVEL_INFO, "[AutoTTS] pending set");
-      }
-#endif
     }
   } else if (reply_t) {
     snprintf(s_reply_buf, sizeof(s_reply_buf), "%s", reply_t->value->cstring);
     if (s_state == STATE_THINKING || s_state == STATE_SENDING) {
       // 缩小动画 → RESPONSE
       set_state(STATE_SHRINKING);
-#if defined(PBL_PLATFORM_EMERY)
-      // 自动朗读：兜底完整回复路径同样标记（需已配 TTS key）
-      APP_LOG(APP_LOG_LEVEL_INFO, "[AutoTTS] reply_t: auto_tts=%d has_tts_key=%d reply_len=%d",
-              s_auto_tts, s_has_tts_key, (int)strlen(s_reply_buf));
-      if (s_auto_tts && s_has_tts_key && s_reply_buf[0] != '\0') {
-        s_auto_tts_pending = 1;
-        APP_LOG(APP_LOG_LEVEL_INFO, "[AutoTTS] pending set (reply_t path)");
-      }
-#endif
     } else if (s_state == STATE_RESPONSE) {
       update_response_text();
     }
@@ -1777,9 +1763,7 @@ static void window_load(Window *window) {
   s_font_bold = persist_exists(PERSIST_KEY_FONT_BOLD) ? (int)persist_read_int(PERSIST_KEY_FONT_BOLD) : 0;
   s_disable_surprise = persist_exists(PERSIST_KEY_DISABLE_SURPRISE) ? (int)persist_read_int(PERSIST_KEY_DISABLE_SURPRISE) : 0;
   s_health_enabled = persist_exists(PERSIST_KEY_HEALTH_ENABLED) ? (int)persist_read_int(PERSIST_KEY_HEALTH_ENABLED) : 0;
-  s_auto_tts = persist_exists(PERSIST_KEY_AUTO_TTS) ? (int)persist_read_int(PERSIST_KEY_AUTO_TTS) : 0;
   s_web_search = persist_exists(PERSIST_KEY_WEB_SEARCH) ? (int)persist_read_int(PERSIST_KEY_WEB_SEARCH) : 1;
-  s_has_tts_key = persist_exists(PERSIST_KEY_HAS_TTS_KEY) ? (int)persist_read_int(PERSIST_KEY_HAS_TTS_KEY) : 0;
 #if defined(PBL_PLATFORM_EMERY)
   s_tts_volume = persist_exists(PERSIST_KEY_TTS_VOLUME) ? (int)persist_read_int(PERSIST_KEY_TTS_VOLUME) : 100;
   if (s_tts_volume < 0) s_tts_volume = 0;
