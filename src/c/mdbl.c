@@ -317,6 +317,24 @@ static void tts_delayed_close_callback(void *data) {
         s_tts_watchdog_timer = NULL;
       }
     }
+  } else if (s_tts_count > 0 && !s_tts_all_sent && s_speaker_open) {
+    // 缓冲有残余但不是流尾（句间/异常停顿 1500ms 无新数据到达）。
+    // 不再空转等数据：把残余冲掉并关闭扬声器，避免 20ms 重试空转到 30s watchdog。
+    // 这是数据流中断的兜底，正常情况下句间 TTS_END/TTS_DONE 会正常推进。
+    APP_LOG(APP_LOG_LEVEL_WARNING, "TTS close timeout with %d bytes remaining", (int)s_tts_count);
+    s_tts_count = 0;
+    s_tts_head = 0;
+    s_tts_tail = 0;
+    speaker_stream_close();
+    s_speaker_open = false;
+    s_tts_playing = false;
+    s_tts_loading = false;
+    s_tts_paused = false;
+    layer_mark_dirty(s_canvas_layer);
+    if (s_tts_watchdog_timer) {
+      app_timer_cancel(s_tts_watchdog_timer);
+      s_tts_watchdog_timer = NULL;
+    }
   }
 }
 
@@ -361,6 +379,11 @@ static void tts_push(const uint8_t *data, uint16_t len) {
       s_tts_ring[s_tts_tail] = data[i];
       s_tts_tail = (s_tts_tail + 1) % TTS_RING_SIZE;
       s_tts_count++;
+    } else {
+      // 缓冲溢出：流控 PAUSE 往返期间在途 chunk 超出预期余量。
+      // 记日志便于诊断（正常不应触发；触发则需调大 RING/HIGH 或减小 watermark）。
+      APP_LOG(APP_LOG_LEVEL_WARNING, "TTS ring overflow, dropping %d bytes", (int)(len - i));
+      break;
     }
   }
   tts_cancel_close_timer();
@@ -380,7 +403,12 @@ static void tts_start_playback(void) {
   if (!s_speaker_open) {
     bool ok = speaker_stream_open(SpeakerPcmFormat_8kHz_8bit, 100);
     if (!ok) {
+      // 扬声器打开失败：快速失败而非等 30s watchdog。
+      // 清理 TTS 状态恢复按钮语义，通知 JS 停止发送。
       APP_LOG(APP_LOG_LEVEL_ERROR, "Speaker open failed");
+      tts_stop();
+      tts_cancel_remote();
+      vibes_double_pulse();
       return;
     }
     s_speaker_open = true;
@@ -1219,7 +1247,9 @@ static void set_state(AppState new_state) {
 static void inbox_received(DictionaryIterator *iter, void *context) {
   Tuple *ready_t = dict_find(iter, MESSAGE_KEY_READY_STATUS);
   if (ready_t) {
-    bool ready = (ready_t->value->int32 == 1);
+    // JS 端 sendToWatch({'READY_STATUS': isReady}) 发送小整数，PebbleKit JS 自动编码为 uint8。
+    // 用 uint8 读取（与 JS 编码一致），避免 int32 读 4 字节时高 3 字节残留导致误判。
+    bool ready = (ready_t->value->uint8 == 1);
     persist_write_bool(PERSIST_KEY_READY, ready);
     if (s_state == STATE_IDLE_NO_KEY || s_state == STATE_IDLE_READY) {
       set_state(ready ? STATE_IDLE_READY : STATE_IDLE_NO_KEY);
@@ -1353,10 +1383,14 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   Tuple *status_t = dict_find(iter, MESSAGE_KEY_STATUS);
   if (status_t && !reply_t && !reply_chunk_t) {
 #if defined(PBL_PLATFORM_EMERY)
-    // TTS 失败回传的 STATUS：清理 TTS 状态，不污染回复内容
-    // 检查 s_tts_playing 或 s_tts_loading：加载阶段（等首个 chunk）也可能收到错误 STATUS，
-    // 此时 s_tts_playing=true 但 s_tts_loading 也=true；用 OR 确保两种情况都清理。
-    if (s_tts_playing || s_tts_loading) {
+    // TTS 失败回传的 STATUS：清理 TTS 状态，不污染回复内容。
+    // 区分 TTS 错误与普通错误：JS 端 TTS 错误的 STATUS 文本以 "TTS" 开头
+    // （如 "TTS error: HTTP 403"、"TTS: API key invalid"、"No TTS API key" 等）。
+    // 非前缀的 STATUS（如后台同步错误）即使在 TTS 播放中到达也不应误停 TTS。
+    const char *status_msg = status_t->value->cstring;
+    bool is_tts_error = (strncmp(status_msg, "TTS", 3) == 0 ||
+                         strncmp(status_msg, "No TTS", 6) == 0);
+    if (is_tts_error && (s_tts_playing || s_tts_loading)) {
       tts_stop();
       return;
     }
@@ -1385,23 +1419,34 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   // TTS 音频分块（raw 8bit PCM 字节）
   Tuple *tts_chunk_t = dict_find(iter, MESSAGE_KEY_TTS_CHUNK);
   if (tts_chunk_t) {
-    s_tts_playing = true;
-    // 首个音频块到达：清除加载提示，恢复原标题
-    if (s_tts_loading) {
-      s_tts_loading = false;
-      layer_mark_dirty(s_canvas_layer);
+    // Session-active 守卫：只有正在播放或加载中才接受音频 chunk。
+    // tts_stop/tts_cancel_remote 后蓝牙管道里仍可能有在途 chunk 到达，
+    // 不加守卫会无条件复活 s_tts_playing=true 并把旧音频推入已清空的缓冲，
+    // 导致按钮瘫痪（30s watchdog 才恢复）或新 session 音频污染。
+    if (!s_tts_playing && !s_tts_loading) {
+      APP_LOG(APP_LOG_LEVEL_WARNING, "TTS chunk dropped: no active session");
+    } else {
+      // 首个音频块到达：清除加载提示，恢复原标题
+      if (s_tts_loading) {
+        s_tts_loading = false;
+        layer_mark_dirty(s_canvas_layer);
+      }
+      tts_push(tts_chunk_t->value->data, tts_chunk_t->length);
+      // 缓冲达到阈值后开始播放（speaker 已开也调，幂等重注册定时器防句间死锁）
+      if (s_tts_count >= TTS_START_THRESHOLD) {
+        tts_start_playback();
+      }
+      tts_reset_watchdog();  // 收到数据，重置看门狗
     }
-    tts_push(tts_chunk_t->value->data, tts_chunk_t->length);
-    // 缓冲达到阈值后开始播放（speaker 已开也调，幂等重注册定时器防句间死锁）
-    if (s_tts_count >= TTS_START_THRESHOLD) {
-      tts_start_playback();
-    }
-    tts_reset_watchdog();  // 收到数据，重置看门狗
   }
 
   // TTS 结束标记：若缓冲还没开播，立即开播把剩余放完
   Tuple *tts_end_t = dict_find(iter, MESSAGE_KEY_TTS_END);
   if (tts_end_t) {
+    // 句间会等下一句 TTS API 往返，期间无 chunk 到达。重置看门狗避免误超时。
+    if (s_tts_playing || s_tts_loading) {
+      tts_reset_watchdog();
+    }
     if (s_tts_count > 0) {
       tts_start_playback();
     }
@@ -1420,8 +1465,8 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     if (s_tts_count > 0) {
       // 还有未播数据：标记等排空，保持 playing=true 让停止手势有效
       s_tts_all_sent = true;
-      // 关键：唤醒播放定时器。新逻辑下缓冲不足一帧时不写半帧、靠 100ms 重试等数据；
-      // 若此刻定时器未在跑（例如末句短、从未达到 3000B 开播阈值，或上一个 TTS_END 被丢），
+      // 关键：唤醒播放定时器。新逻辑下缓冲不足一帧时不写半帧、靠 20ms 重试等数据；
+      // 若此刻定时器未在跑（例如末句短、从未达到 6000B 开播阈值，或上一个 TTS_END 被丢），
       // 仅置 all_sent 不会触发播放，尾料会卡在缓冲里。这里显式开播兜底。
       tts_start_playback();
     } else {
@@ -1605,7 +1650,9 @@ static void down_long_handler(ClickRecognizerRef r, void *ctx) {
     vibes_double_pulse();
     return;
   }
-  if (s_state == STATE_SENDING || s_state == STATE_THINKING ||
+  // 处理中不允许触发彩蛋（含 RECORDING：录音中长按 DOWN 会与 dictation 冲突）
+  if (s_state == STATE_RECORDING || s_state == STATE_SENDING ||
+      s_state == STATE_THINKING ||
       s_state == STATE_SHRINKING || s_state == STATE_EXPANDING) {
     vibes_double_pulse();
     return;

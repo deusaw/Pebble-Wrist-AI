@@ -610,6 +610,18 @@ function startTTS() {
   ttsAudioQueue = [];
   ttsFetchingCount = 0;       // 重置并发计数
   ttsPaused = false;          // 新请求：清除上一次可能残留的流控暂停态
+  // 从 amQueue 移除上一次 session 残留的 TTS chunk。
+  // watch 的 tts_request() 不发 TTS_CANCEL（避免 outbox 占用），所以旧 chunk 会继续
+  // 灌入新 session 的缓冲 → 音频污染。这里显式过滤。
+  // 注意：若 amQueue[0] 正在发送（amSending）则保留它（与 cancelTTS 同理）。
+  var startIndex = amSending ? 1 : 0;
+  var kept = amQueue.slice(0, startIndex);
+  var rest = amQueue.slice(startIndex).filter(function(item) {
+    return typeof item.payload['TTS_CHUNK'] === 'undefined' &&
+           typeof item.payload['TTS_END'] === 'undefined' &&
+           typeof item.payload['TTS_DONE'] === 'undefined';
+  });
+  amQueue = kept.concat(rest);
 
   // 启动预取流水线：立即发起 2 个并发 TTS 请求填充管线，
   // 让第二句在第一句播放期间已编码就绪，消除句间 API 往返空窗。
@@ -727,8 +739,17 @@ function ttsSendNext(sessionId) {
 
   // 手表流控：缓冲水位过高时发来 TTS_PAUSE，停止投递新 chunk。
   // 已在 amQueue 里或正在发的 chunk 会自然发完（不截断半句，避免音频缺口）。
-  // 此处 return 直接退出，不挂 setTimeout——由 TTS_RESUME 处理器调 ttsSendNext 唤醒。
-  if (ttsPaused) return;
+  // 防 stale PAUSE 死锁：挂 2s 自动恢复检查。正常情况 TTS_RESUME 在 300-500ms 内到达唤醒；
+  // 若 2s 仍暂停（旧 session 的 stale PAUSE），自动清除暂停继续投递，避免等 30s watchdog。
+  if (ttsPaused) {
+    setTimeout(function() {
+      if (sessionId === ttsSessionId && ttsPaused) {
+        ttsPaused = false;
+        ttsSendNext(sessionId);
+      }
+    }, 2000);
+    return;
+  }
 
   // 安全阀：amQueue 堆积过多（PAUSE 往返延迟期间可能堆积）时短暂等待，
   // 让 processAmQueue 消化。正常流程下 PAUSE 会在缓冲到 HIGH 时及时触发，
@@ -870,6 +891,9 @@ Pebble.addEventListener('appmessage', function(e) {
 
   // ── TTS 流控（手表环形缓冲水位信号）──
   // PAUSE：手表缓冲接近溢出，停止投递新 chunk；RESUME：缓冲已排空到安全线，继续投递。
+  // 防 stale PAUSE 死锁：cancelTTS/startTTS 置 ttsPaused=false，但旧 session 的在途 PAUSE
+  // 可能在新 session 启动后到达，错误暂停新 session。ttsSendNext 里 ttsPaused 检查带 2s
+  // 自动恢复兜底（无 RESUME 到达则清除暂停），避免永久死锁等 watchdog。
   if (typeof e.payload['TTS_PAUSE'] !== 'undefined') {
     ttsPaused = true;
     return;
@@ -905,11 +929,16 @@ Pebble.addEventListener('appmessage', function(e) {
   // 检查定位开关
   var locationEnabled = (getSetting('location_enabled', '0') === '1');
 
+  // 捕获当前问答 session ID：GPS/地理编码异步回调最多 5s，期间用户可能已问新问题。
+  // 回调中比对 session，旧问题的迟到结果不覆盖新问题的回复。
+  var locSessionId = currentAskSessionId;
+
   // 如果定位开关打开，先获取 GPS，再调 askAI；否则直接调
   if (locationEnabled) {
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         function success(pos) {
+          if (locSessionId !== currentAskSessionId) return;  // 旧问题，丢弃
           var lat = pos.coords.latitude;
           var lng = pos.coords.longitude;
           // 反向地理编码：坐标 → 城市名（免费 API，无需 key，CORS 友好）
@@ -919,6 +948,7 @@ Pebble.addEventListener('appmessage', function(e) {
           geoXhr.open('GET', geoUrl, true);
           geoXhr.timeout = 3000;
           geoXhr.onload = function() {
+            if (locSessionId !== currentAskSessionId) return;  // 旧问题，丢弃
             var locStr = lat.toFixed(2) + ', ' + lng.toFixed(2);  // 回退：裸坐标
             try {
               var geo = JSON.parse(geoXhr.responseText);
@@ -934,12 +964,14 @@ Pebble.addEventListener('appmessage', function(e) {
             callAskAI(question, contextText, MAX_WATCH_CHARS);
           };
           geoXhr.onerror = function() {
+            if (locSessionId !== currentAskSessionId) return;  // 旧问题，丢弃
             // 反查失败，回退到裸坐标
             if (contextText) contextText += '\n';
             contextText += '- Approx location: ' + lat.toFixed(2) + ', ' + lng.toFixed(2);
             callAskAI(question, contextText, MAX_WATCH_CHARS);
           };
           geoXhr.ontimeout = function() {
+            if (locSessionId !== currentAskSessionId) return;  // 旧问题，丢弃
             // 超时，回退到裸坐标
             if (contextText) contextText += '\n';
             contextText += '- Approx location: ' + lat.toFixed(2) + ', ' + lng.toFixed(2);
@@ -948,6 +980,7 @@ Pebble.addEventListener('appmessage', function(e) {
           geoXhr.send();
         },
         function error() {
+          if (locSessionId !== currentAskSessionId) return;  // 旧问题，丢弃
         // 定位失败（用户拒绝/超时），不带定位继续
           callAskAI(question, contextText, MAX_WATCH_CHARS);
         },
@@ -1122,15 +1155,20 @@ Pebble.addEventListener('webviewclosed', function(e) {
 
     if (settings.delete_chat) {
       var store2 = loadStore();
+      // 若删除的是当前活跃对话，停止其 TTS 朗读
+      if (store2.active_id === settings.delete_chat) cancelTTS();
       deleteChat(store2, settings.delete_chat);
     }
 
     // 批量删除（config 页面积累的多条删除操作）
     if (settings.deleted_chats && Array.isArray(settings.deleted_chats)) {
       var storeD = loadStore();
+      var activeDeleted = false;
       for (var di = 0; di < settings.deleted_chats.length; di++) {
+        if (storeD.active_id === settings.deleted_chats[di]) activeDeleted = true;
         storeD.chats = storeD.chats.filter(function(c) { return c.id !== settings.deleted_chats[di]; });
       }
+      if (activeDeleted) cancelTTS();  // 活跃对话被删，停止其 TTS
       if (storeD.active_id) {
         var stillExists = false;
         for (var si = 0; si < storeD.chats.length; si++) {
@@ -1145,6 +1183,7 @@ Pebble.addEventListener('webviewclosed', function(e) {
 
     if (settings.clear_all) {
       currentAskSessionId++;
+      cancelTTS();  // 全部清除：停止任何正在进行的 TTS
       var store3 = loadStore();
       store3.chats = [];
       store3.active_id = null;
