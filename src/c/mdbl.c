@@ -363,6 +363,7 @@ static void tts_schedule_close_timer(void) {
 }
 
 static void tts_stop(void);  // 前向声明：看门狗回调在 tts_stop 定义之前调用它
+static void tts_cancel_remote(void);  // 前向声明：看门狗在定义之前调用
 
 // TTS 看门狗：防止 TTS_DONE/STATUS 被蓝牙丢弃导致 playing/loading 永久卡死
 static void tts_watchdog_callback(void *data) {
@@ -370,6 +371,7 @@ static void tts_watchdog_callback(void *data) {
   if (s_tts_playing) {
     APP_LOG(APP_LOG_LEVEL_WARNING, "TTS watchdog timeout");
     tts_stop();
+    tts_cancel_remote();  // 通知 JS 停止发送
     vibes_double_pulse();
   }
 }
@@ -455,9 +457,14 @@ static void tts_stop(void) {
     s_tts_watchdog_timer = NULL;
   }
   tts_reset_adpcm();
-  // 通知 JS 取消：停止 fetch/send 并清空 amQueue 里的 TTS chunk，
-  // 防止手表停止后 JS 队列残余 chunk 继续到达导致音频自动恢复播放。
-  // 用独立 iter 发送，失败静默忽略（tts_stop 本身已清本地状态）。
+  // 注意：不发 TTS_CANCEL。tts_stop 只清本地状态。
+  // 需要通知 JS 停止发送时由调用方调 tts_cancel_remote()，
+  // 避免 tts_request 里 tts_stop 占用 outbox 导致 TTS_REQUEST 发送失败。
+}
+
+// 通知 JS 取消 TTS：停止 fetch/send 并清空 amQueue 里的 TTS chunk。
+// 与 tts_stop 分离，避免 tts_request→tts_stop→outbox 占用导致 TTS_REQUEST 失败。
+static void tts_cancel_remote(void) {
   DictionaryIterator *iter;
   if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
     dict_write_uint8(iter, MESSAGE_KEY_TTS_CANCEL, 1);
@@ -467,7 +474,7 @@ static void tts_stop(void) {
 
 // 向手机请求朗读当前回复
 static void tts_request(void) {
-  tts_stop();          // 清掉旧状态
+  tts_stop();          // 清掉旧状态（不发 TTS_CANCEL，避免占用 outbox）
   tts_reset_adpcm();
   s_tts_playing = true;
   s_tts_loading = true;
@@ -1449,6 +1456,7 @@ static void outbox_failed(DictionaryIterator *iter, AppMessageResult reason, voi
   // s_tts_playing=true，问答 SENDING 状态下 s_tts_playing=false），无需读 iter。
   if (s_tts_playing) {
     tts_stop();
+    tts_cancel_remote();  // 通知 JS 停止发送残余 chunk
     vibes_double_pulse();
   }
 #endif
@@ -1469,6 +1477,7 @@ static void select_handler(ClickRecognizerRef r, void *ctx) {
   // TTS 播放中 → 短按 SELECT 停止朗读
   if (s_tts_playing) {
     tts_stop();
+    tts_cancel_remote();  // 通知 JS 停止发送
     return;
   }
 #endif
@@ -1496,7 +1505,7 @@ static void select_long_handler(ClickRecognizerRef r, void *ctx) {
     return;
   }
 #if defined(PBL_PLATFORM_EMERY)
-  if (s_tts_playing) { tts_stop(); vibes_double_pulse(); return; }
+  if (s_tts_playing) { tts_stop(); tts_cancel_remote(); vibes_double_pulse(); return; }
 #endif
 
   if (s_state == STATE_IDLE_READY || s_state == STATE_RESPONSE) {
@@ -1882,6 +1891,7 @@ static void menu_select_click(MenuLayer *menu, MenuIndex *idx, void *ctx) {
   // 切换对话前停止 TTS（防止旧回复音频继续播放）
   if (s_tts_playing) {
     tts_stop();
+    tts_cancel_remote();  // 通知 JS 停止发送旧回复的 chunk
   }
 #endif
   if (idx->row == 0) {
