@@ -633,18 +633,19 @@ function startTTS() {
   });
   amQueue = kept.concat(rest);
 
-  // 启动预取流水线：立即发起 2 个并发 TTS 请求填充管线，
-  // 让第二句在第一句播放期间已编码就绪，消除句间 API 往返空窗。
+  // 启动预取流水线：立即发起 3 个并发 TTS 请求填充管线，
+  // 让后续 2 句在当前句播放期间已编码就绪，消除长文本后期句间 API 往返空窗。
+  ttsFetchNext(ttsApiKey, thisSession);
   ttsFetchNext(ttsApiKey, thisSession);
   ttsFetchNext(ttsApiKey, thisSession);
   ttsSendNext(thisSession);
 }
 
 // LOOP 1：逐句调 Google TTS → 转 raw 8bit PCM → 推入音频队列
-// 预取流水线：允许最多 2 个并发 TTS 请求，保证播放当前句时下一句已在编码/到达中，
-// 消除"当前句播完、下一句 API 还在往返"的句间空窗（短句尤其明显：10 字 ≈ 2 秒音频，
-// 而 Google TTS RTT 可达 1-2 秒，串行 fetch 会赶不上消费）。
-var TTS_PREFETCH_CONCURRENCY = 2;
+// 预取流水线：允许最多 3 个并发 TTS 请求，保证播放当前句时后面 2 句已在编码/到达中。
+// 2 并发在长文本（~10 秒后）领先优势会被消费光——第 5-6 句的 TTS API 响应稍慢
+// 就赶不上 8000 B/s 消费，缓冲见底 → 卡顿。3 并发多一层领先缓冲。
+var TTS_PREFETCH_CONCURRENCY = 3;
 var ttsFetchingCount = 0;
 function ttsFetchNext(ttsApiKey, sessionId) {
   if (ttsFetchingCount >= TTS_PREFETCH_CONCURRENCY) return;
