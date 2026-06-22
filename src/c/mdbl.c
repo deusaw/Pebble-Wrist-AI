@@ -1150,6 +1150,7 @@ static void set_state(AppState new_state) {
 #if defined(PBL_PLATFORM_EMERY)
       // 自动朗读：动画完成后触发 TTS
       if (s_auto_tts_pending) {
+        APP_LOG(APP_LOG_LEVEL_INFO, "[AutoTTS] triggering tts_request");
         s_auto_tts_pending = 0;
         tts_request();
       }
@@ -1333,8 +1334,11 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
 #if defined(PBL_PLATFORM_EMERY)
       // 自动朗读：仅新问答路径（SHRINKING→RESPONSE）才标记待触发。
       // 需已配 TTS key，否则每条回复会空震动一次（JS 预检失败静默）。
+      APP_LOG(APP_LOG_LEVEL_INFO, "[AutoTTS] reply_end: auto_tts=%d has_tts_key=%d reply_len=%d",
+              s_auto_tts, s_has_tts_key, (int)strlen(s_reply_buf));
       if (s_auto_tts && s_has_tts_key && s_reply_buf[0] != '\0') {
         s_auto_tts_pending = 1;
+        APP_LOG(APP_LOG_LEVEL_INFO, "[AutoTTS] pending set");
       }
 #endif
     }
@@ -1345,8 +1349,11 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
       set_state(STATE_SHRINKING);
 #if defined(PBL_PLATFORM_EMERY)
       // 自动朗读：兜底完整回复路径同样标记（需已配 TTS key）
+      APP_LOG(APP_LOG_LEVEL_INFO, "[AutoTTS] reply_t: auto_tts=%d has_tts_key=%d reply_len=%d",
+              s_auto_tts, s_has_tts_key, (int)strlen(s_reply_buf));
       if (s_auto_tts && s_has_tts_key && s_reply_buf[0] != '\0') {
         s_auto_tts_pending = 1;
+        APP_LOG(APP_LOG_LEVEL_INFO, "[AutoTTS] pending set (reply_t path)");
       }
 #endif
     } else if (s_state == STATE_RESPONSE) {

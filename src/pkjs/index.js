@@ -232,6 +232,7 @@ function sendReadyStatus() {
     var webSearch = parseInt(getSetting('web_search_enabled', '1'), 10);
     var ttsApiKey = getSetting('tts_api_key', '');
     var hasTtsKey = (ttsApiKey && ttsApiKey.trim().length > 0) ? 1 : 0;
+    console.log('[Settings] autoTts=' + autoTts + ' hasTtsKey=' + hasTtsKey + ' healthEnabled=' + healthEnabled + ' webSearch=' + webSearch);
     sendToWatch({ 'FONT_SIZE': fontSize, 'FONT_BOLD': fontBold, 'DISABLE_SURPRISE': disableSurprise, 'HEALTH_ENABLED': healthEnabled, 'AUTO_TTS': autoTts, 'WEB_SEARCH_ENABLED': webSearch, 'HAS_TTS_KEY': hasTtsKey });
   }, 200);
   setTimeout(sendChatList, 400);  // 稍长间隔确保 READY_STATUS 先到
@@ -594,6 +595,8 @@ function cancelTTS() {
   ttsIsFetching = false;
   ttsAudioQueue = [];
   ttsSentenceQueue = [];
+  ttsCurrentSentence = null;
+  ttsCurrentOffset = 0;
   // 从 amQueue 移除待发的 TTS 消息。
   // 注意：若 amQueue[0] 正在发送（amSending=true），必须保留它，
   // 否则发送成功回调的 amQueue.shift() 会 shift 掉错误元素。
@@ -672,10 +675,15 @@ function ttsFetchNext(ttsApiKey, sessionId) {
   xhr.open('POST', url, true);
   xhr.setRequestHeader('Content-Type', 'application/json');
   
+  // 语速：config 可配（默认 1.0 正常语速），范围 0.25-4.0
+  var speakingRate = parseFloat(getSetting('tts_rate', '1.0'));
+  if (isNaN(speakingRate) || speakingRate < 0.25) speakingRate = 0.25;
+  if (speakingRate > 4.0) speakingRate = 4.0;
+
   var body = {
     input: { text: sentence },
     voice: { languageCode: voice.lang, name: voice.name },
-    audioConfig: { audioEncoding: 'LINEAR16', sampleRateHertz: 8000, speakingRate: 0.92 }
+    audioConfig: { audioEncoding: 'LINEAR16', sampleRateHertz: 8000, speakingRate: speakingRate }
   };
 
   xhr.onload = function() {
@@ -733,47 +741,66 @@ function ttsFetchNext(ttsApiKey, sessionId) {
 }
 
 // LOOP 2：从音频队列取 ADPCM 数据 → 分块入 amQueue 串行发送
-// 背压：限制 amQueue 里待发的 TTS chunk 数量，避免灌满手表 16KB 环形缓冲后溢出丢字节。
-// 手表缓冲 16384B / 每 chunk 700B ≈ 23 chunk 容量；水位设 6（~4.2KB ≈ 1秒音频）留足余量。
-// 超过水位则等播放消耗后再推，JS 不超前发送 → 手表缓冲不会溢出 → ADPCM 状态不丢步。
-var TTS_AMQUEUE_WATERMARK = 6;
+// 背压：逐 chunk 控制，每次只 push 一个 700B chunk，检查 amQueue 水位后重新调度。
+// 避免一次性把整句（可能数十 KB）灌入 amQueue → 手表 16KB 环形缓冲溢出 → ADPCM 失步后半段变噪声。
+var TTS_AMQUEUE_WATERMARK = 4;   // amQueue 里待发 TTS chunk 上限（约 2.8KB ≈ 0.35s 音频）
+var TTS_CHUNK_SIZE = 700;
+var ttsCurrentSentence = null;   // 正在分块发送的句子（字节组）
+var ttsCurrentOffset = 0;        // 当前句子已发送到的字节偏移
+
+function ttsPendingChunkCount() {
+  var n = 0;
+  for (var q = 0; q < amQueue.length; q++) {
+    if (typeof amQueue[q].payload['TTS_CHUNK'] !== 'undefined') n++;
+  }
+  return n;
+}
 
 function ttsSendNext(sessionId) {
   if (sessionId !== ttsSessionId) return;  // 旧 session，停止
-  // 背压：统计 amQueue 里待发的 TTS chunk，超水位则等消化后再推
-  var pendingTtsChunks = 0;
-  for (var q = 0; q < amQueue.length; q++) {
-    if (typeof amQueue[q].payload['TTS_CHUNK'] !== 'undefined') pendingTtsChunks++;
-  }
-  if (pendingTtsChunks >= TTS_AMQUEUE_WATERMARK) {
-    setTimeout(function() { ttsSendNext(sessionId); }, 400);
+
+  // 背压：amQueue 待发 chunk 超水位则等消化
+  if (ttsPendingChunkCount() >= TTS_AMQUEUE_WATERMARK) {
+    setTimeout(function() { ttsSendNext(sessionId); }, 300);
     return;
   }
+
+  // 当前句子还没发完：发下一个 chunk
+  if (ttsCurrentSentence && ttsCurrentOffset < ttsCurrentSentence.length) {
+    var chunk = [];
+    var end = ttsCurrentOffset + TTS_CHUNK_SIZE;
+    if (end > ttsCurrentSentence.length) end = ttsCurrentSentence.length;
+    for (var i = ttsCurrentOffset; i < end; i++) {
+      chunk.push(ttsCurrentSentence[i]);
+    }
+    sendToWatch({ 'TTS_CHUNK': chunk });
+    ttsCurrentOffset = end;
+    // 短延迟后继续发下一个 chunk（让背压检查生效）
+    setTimeout(function() { ttsSendNext(sessionId); }, 10);
+    return;
+  }
+
+  // 当前句子发完：发结束标记，准备取下一句
+  if (ttsCurrentSentence) {
+    sendToWatch({ 'TTS_END': 1 });
+    ttsCurrentSentence = null;
+    ttsCurrentOffset = 0;
+  }
+
+  // 取下一句
   if (ttsAudioQueue.length === 0) {
     // 队列空了但句子可能还在编码，等一会再查
     if (ttsIsFetching || ttsSentenceQueue.length > 0) {
-      setTimeout(function() { ttsSendNext(sessionId); }, 400);
+      setTimeout(function() { ttsSendNext(sessionId); }, 300);
       return;
     }
     // 全部句子发完且无在途编码：发"朗读全部结束"标记
-    // （手表据此置 s_tts_playing=false，恢复按钮正常语义）
     sendToWatch({ 'TTS_DONE': 1 });
     return;
   }
 
-  var adpcmBytes = ttsAudioQueue.shift();
-  var chunkSize = 700;
-  for (var i = 0; i < adpcmBytes.length; i += chunkSize) {
-    var chunk = [];
-    for (var j = 0; j < chunkSize && (i + j) < adpcmBytes.length; j++) {
-      chunk.push(adpcmBytes[i + j]);
-    }
-    sendToWatch({ 'TTS_CHUNK': chunk });
-  }
-  // 当前句发完，发结束标记
-  sendToWatch({ 'TTS_END': 1 });
-
-  // 继续发下一句（通过轮询，等 amQueue 消化 + 新句子编码好）
+  ttsCurrentSentence = ttsAudioQueue.shift();
+  ttsCurrentOffset = 0;
   setTimeout(function() { ttsSendNext(sessionId); }, 4);
 }
 
@@ -992,6 +1019,7 @@ Pebble.addEventListener('showConfiguration', function() {
     + '&health_enabled=' + encodeURIComponent(getSetting('health_enabled', '0'))
     + '&auto_tts=' + encodeURIComponent(getSetting('auto_tts', '0'))
     + '&has_tts_key=' + (getSetting('tts_api_key', '') ? '1' : '0')
+    + '&tts_rate=' + encodeURIComponent(getSetting('tts_rate', '1.0'))
     + '#export_data=' + encodeURIComponent(JSON.stringify(safeDocs));
 
   Pebble.openURL(url);
@@ -1062,6 +1090,9 @@ Pebble.addEventListener('webviewclosed', function(e) {
     }
     if (settings.tts_api_key && settings.tts_api_key.trim().length > 0) {
       localStorage.setItem('tts_api_key', settings.tts_api_key.trim());
+    }
+    if (settings.tts_rate) {
+      localStorage.setItem('tts_rate', settings.tts_rate);
     }
 
     if (settings.switch_to) {

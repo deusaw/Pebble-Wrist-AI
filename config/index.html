@@ -128,6 +128,13 @@
      <label>Google Cloud TTS API Key <span class="beta-badge">Beta</span></label>
      <input type="password" id="tts_api_key" placeholder="AIza...">
      <div class="hint">Required for text-to-speech. Get a key from Google Cloud Console. Only works on Pebble Time 2 (Emery).</div>
+     <label style="margin-top:8px;display:block">Speech Rate</label>
+     <select id="tts_rate" style="width:100%;padding:6px;background:#1a1a2e;color:#fff;border:1px solid #444;border-radius:4px">
+       <option value="0.75">0.75× (Slower)</option>
+       <option value="1.0" selected>1.0× (Normal)</option>
+       <option value="1.25">1.25× (Faster)</option>
+       <option value="1.5">1.5× (Fast)</option>
+     </select>
      <div class="beta-hint">⚠️ This feature is part of v1.3.0 (beta).</div>
      <button class="btn btn-danger" id="delete_tts_key" style="margin-top:6px">Delete TTS Key</button>
    </div>
@@ -357,6 +364,11 @@
     if (hasTtsKey) {
       ttsKeyEl.placeholder = 'Key is set. Leave blank to keep.';
     }
+    var ttsRate = getParam('tts_rate') || '1.0';
+    var ttsRateEl = document.getElementById('tts_rate');
+    for (var ri = 0; ri < ttsRateEl.options.length; ri++) {
+      if (ttsRateEl.options[ri].value === ttsRate) { ttsRateEl.selectedIndex = ri; break; }
+    }
 
     // 填充设置
     document.getElementById('key_status').textContent =
@@ -478,7 +490,8 @@
         location_enabled: document.getElementById('location_enabled').checked ? 1 : 0,
         web_search_enabled: document.getElementById('web_search_enabled').checked ? 1 : 0,
         health_enabled: document.getElementById('health_enabled').checked ? 1 : 0,
-        auto_tts: document.getElementById('auto_tts').checked ? 1 : 0
+        auto_tts: document.getElementById('auto_tts').checked ? 1 : 0,
+        tts_rate: document.getElementById('tts_rate').value
       };
       var key = document.getElementById('api_key').value.trim();
       if (key.length > 0) s.api_key = key;
