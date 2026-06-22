@@ -346,6 +346,12 @@
 
     // TTS key 状态
     var hasTtsKey = getParam('has_tts_key') === '1';
+    var isEmery = getParam('is_emery') === '1';
+    // 非 Emery 平台无扬声器，隐藏整个 TTS 配置区域
+    if (!isEmery) {
+      var voiceWrap = document.getElementById('voice_wrap');
+      if (voiceWrap) voiceWrap.style.display = 'none';
+    }
     var ttsKeyEl = document.getElementById('tts_api_key');
     if (hasTtsKey) {
       ttsKeyEl.placeholder = 'Key is set. Leave blank to keep.';

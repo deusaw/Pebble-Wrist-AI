@@ -1070,8 +1070,16 @@ Pebble.addEventListener('showConfiguration', function() {
   var apiMode = getSetting('api_mode', 'openrouter');
   var customApiUrl = getSetting('custom_api_url', '');
 
+  // 检测手表平台：TTS 仅 Emery 可用，非 Emery 时隐藏 config 页 TTS 区域
+  var isEmery = '0';
+  try {
+    var watchInfo = Pebble.getActiveWatchInfo();
+    if (watchInfo && watchInfo.platform === 'emery') isEmery = '1';
+  } catch (e) {}
+
   var url = 'https://deusaw.github.io/Pebble-Wrist-AI/config/'
     + '?has_key=' + hasKey
+    + '&is_emery=' + isEmery
     + '&model=' + encodeURIComponent(model)
     + '&model_list=' + encodeURIComponent(JSON.stringify(modelList))
     + '&system_message=' + encodeURIComponent(systemMessage)
