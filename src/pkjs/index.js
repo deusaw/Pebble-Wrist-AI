@@ -154,14 +154,25 @@ var currentAskSessionId = 0;
 // 解决 Pebble 原生单次通讯不能超过 256 字节的物理缺陷。此处设立指令队列，确保分块传输时不会丢包或乱序
 var amQueue = [];
 var amSending = false;
+var AM_RETRY_DELAY_MS = 500;
+var TTS_STREAM_RETRY_DELAY_MS = 120; // TTS 流消息失败多为蓝牙/收件箱瞬时忙，500ms 会直接变成可闻大空洞
+
+function isTTSStreamPayload(payload) {
+  return typeof payload['TTS_CHUNK'] !== 'undefined' ||
+         typeof payload['TTS_END'] !== 'undefined' ||
+         typeof payload['TTS_DONE'] !== 'undefined';
+}
 
 function processAmQueue() {
   if (amSending || amQueue.length === 0) return;
   amSending = true;
 
   var item = amQueue[0];
-  // TTS 音频包丢一个会产生音频缺口（raw PCM 无状态，但缺口仍造成卡顿），给更多重试机会
-  var maxRetries = (typeof item.payload['TTS_CHUNK'] !== 'undefined') ? 8 : 3;
+  // TTS 流消息丢一个会产生音频缺口；给更多重试机会，但重试间隔必须短。
+  // 旧的 500ms backoff 连续几次失败会直接变成 2s+ 大空洞。
+  var isTTSStream = isTTSStreamPayload(item.payload);
+  var maxRetries = isTTSStream ? 8 : 3;
+  var retryDelay = isTTSStream ? TTS_STREAM_RETRY_DELAY_MS : AM_RETRY_DELAY_MS;
   Pebble.sendAppMessage(
     item.payload,
     function() {
@@ -173,7 +184,7 @@ function processAmQueue() {
       console.log('sendToWatch fail: ' + JSON.stringify(e));
       item.retries++;
       if (item.retries < maxRetries) {
-        setTimeout(function() { amSending = false; processAmQueue(); }, 500);
+        setTimeout(function() { amSending = false; processAmQueue(); }, retryDelay);
       } else {
         amQueue.shift();
         amSending = false;
