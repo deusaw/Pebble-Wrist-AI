@@ -772,17 +772,14 @@ function ttsFetchNext(ttsApiKey, sessionId) {
 }
 
 // LOOP 2：从音频队列取 raw PCM 数据 → 分块入 amQueue 串行发送
-// 投递速度由 processAmQueue 的 15ms 串行间隔自然限速（350B/15ms≈23k B/s），
-// 仍显著高于手表消费（8000 B/s），但 PAUSE 往返期间的在途数据比 700B chunk 减半。
-// 缓冲会填满 → watch 发 TTS_PAUSE → JS 软降速。不要硬停投递，否则 RESUME 抖动会变成大空洞。
-// 之前的 watermark=3 + 300ms 等待会把平均投递速度压到 ~5800 B/s < 消费 8000 B/s，
-// 导致稳态缓冲单调下降见底 → 一字一顿。现已移除该限速。
-// 保留一个短等待背压阀：只限制 amQueue 积压，不把实际发送速率压到消费速度以下。
+// 终局策略：恒速前馈，而不是靠 PAUSE/RESUME 闭环调速。
+// 正常按 350B/43ms≈8.14KB/s 投递，略高于 8KB/s 播放消费；手表先攒 3s 再开播。
+// PAUSE/RESUME 只作为接近满缓冲的保险，正常朗读不应频繁触发。
 var TTS_AMQUEUE_SAFETY_LIMIT = 8; // amQueue 待发 TTS chunk 安全上限（防 PAUSE 往返期间无限堆积）
-var TTS_CHUNK_SIZE = 350;        // chunk 更细，降低 PAUSE 后在途音频，仍保留 >2x 消费吞吐
-var TTS_SEND_DELAY_MS = 40;      // 350B/40ms≈8.75KB/s，略高于播放消费速度，减少 PAUSE/RESUME 震荡
-var TTS_SOFT_PAUSE_SEND_DELAY_MS = 85; // PAUSE 后不断流，只降到≈4.1KB/s，让 ring 平滑回落
-var TTS_PAUSE_STALE_MS = 1500;   // RESUME 丢失兜底；软降速 1.5s 后恢复正常投递
+var TTS_CHUNK_SIZE = 350;        // 单包适中，减少蓝牙消息数量，同时保持接近播放时钟的恒速投递
+var TTS_SEND_DELAY_MS = 43;      // 350B/43ms≈8.14KB/s，接近播放速率，避免水位大幅震荡
+var TTS_SOFT_PAUSE_SEND_DELAY_MS = 50; // PAUSE 后轻降到≈7KB/s，不断流，只让 ring 缓慢回落
+var TTS_PAUSE_STALE_MS = 7000;   // RESUME 丢失兜底；轻降速足够安全，给 C 端时间降到 LOW
 var ttsCurrentSentence = null;   // 正在分块发送的句子（字节组）
 var ttsCurrentOffset = 0;        // 当前句子已发送到的字节偏移
 
@@ -797,8 +794,8 @@ function ttsPendingChunkCount() {
 function ttsSendNext(sessionId) {
   if (sessionId !== ttsSessionId) return;  // 旧 session，停止
 
-  // 手表流控：PAUSE 不再硬停。硬停会把 ring 跑道烧光，RESUME 延迟就形成 2s+ 空洞。
-  // 这里采用软降速：继续投递少量 chunk，让 speaker 不断粮，同时让 ring 净下降。
+  // PAUSE 是接近满缓冲时的保险，不是日常节拍器。轻降速持续足够久，
+  // 让 ring 回到 LOW；若 RESUME 丢失，7s 后恢复正常恒速，避免永久慢喂导致见底。
   if (ttsPaused && Date.now() - ttsPauseSince >= TTS_PAUSE_STALE_MS) {
     ttsPaused = false;
     ttsPauseSince = 0;

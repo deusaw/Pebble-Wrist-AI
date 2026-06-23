@@ -185,17 +185,16 @@ static int32_t s_active_minutes = 0;
 #define TTS_DECODE_BYTES     1600   // 每次最多写入 200ms 音频，让 speaker FIFO 吸收 AppTimer 抖动
 #define TTS_MIN_WRITE_BYTES  800    // 非流尾至少写 100ms，避免过碎写入造成断续
 #define TTS_PLAYBACK_MS      100    // speaker pump 间隔；JS 发送速率需高于 pump 速率，避免抽干 ring
-#define TTS_START_THRESHOLD  20000  // 开播预缓冲 2.5s，换更稳的蓝牙抖动余量，须 < LOW
+#define TTS_START_THRESHOLD  24000  // 开播预缓冲 3.0s，用启动等待换稳定播放，须 < LOW
 #define TTS_CLOSE_DELAY_MS   1500   // 句间延迟关闭扬声器
 #define TTS_WATCHDOG_MS      60000  // TTS 看门狗：全量预编码可能等待较久，60s 无 chunk/done 才清理
 #define TTS_FLOW_RETRY_MS    120    // PAUSE/RESUME outbox 忙/失败时快速重试，避免 JS 卡在暂停态
 // 流控水位线（watch→JS 暂停/恢复）。
-// raw PCM 8000 B/s 消费；JS 正常约 8.75KB/s 定速投递，PAUSE 后约 4.1KB/s 软降速。
-// LOW=24000（3.0s 跑道）：即使 RESUME 或若干 chunk 重试抖动，也不容易见底。
-// HIGH=30000：在 39KB ring 中仍留 ~10KB 余量；JS 已改为定速/软暂停，不再全速灌爆。
-// HIGH-LOW=6000B=0.75s 消费周期；PAUSE 只触发 JS 降速，不再硬停投递。
-#define TTS_PAUSE_HIGH       30000  // 缓冲≥此值 → 发 TTS_PAUSE（JS 软降速）
-#define TTS_RESUME_LOW       24000  // 缓冲≤此值 → 发 TTS_RESUME（3s 播放跑道防 underrun）
+// raw PCM 8000 B/s 消费；JS 正常约 8.14KB/s 恒速投递，PAUSE 后约 7KB/s 轻降速。
+// 正常播放不再依赖 PAUSE/RESUME 周期，反馈流控只作为接近满缓冲时的保险。
+// LOW=28000（3.5s 跑道），HIGH=34000（距 ring 满约 6KB），防蓝牙抖动时见底或溢出。
+#define TTS_PAUSE_HIGH       34000  // 缓冲≥此值 → 发 TTS_PAUSE（应急轻降速）
+#define TTS_RESUME_LOW       28000  // 缓冲≤此值 → 发 TTS_RESUME（3.5s 播放跑道防 underrun）
 
 static uint8_t s_tts_ring[TTS_RING_SIZE];
 static uint32_t s_tts_head = 0;
