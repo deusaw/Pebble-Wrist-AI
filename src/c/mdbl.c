@@ -339,9 +339,15 @@ static int tts_clamp_volume(int volume) {
   return volume;
 }
 
+static void tts_apply_speaker_volume(void) {
+  s_tts_volume = tts_clamp_volume(s_tts_volume);
+  speaker_set_volume((uint8_t)s_tts_volume);
+}
+
 static bool tts_write_or_buffer(const int8_t *samples, uint16_t len) {
   if (len == 0) return true;
 
+  tts_apply_speaker_volume();
   uint32_t written = speaker_stream_write((uint8_t *)samples, len);
   uint16_t accepted = (written > (uint32_t)len) ? len : (uint16_t)written;
   if (accepted < len) {
@@ -361,6 +367,7 @@ static bool tts_flush_pending_write(void) {
   }
 
   uint16_t remaining = s_tts_pending_write_len - s_tts_pending_write_offset;
+  tts_apply_speaker_volume();
   uint32_t written = speaker_stream_write(
     (uint8_t *)(s_tts_pending_write_buf + s_tts_pending_write_offset),
     remaining
@@ -520,6 +527,7 @@ static void tts_start_playback(void) {
       return;
     }
     s_speaker_open = true;
+    tts_apply_speaker_volume();
   }
   s_tts_started_playback = true;
   if (!s_tts_playback_timer) {
