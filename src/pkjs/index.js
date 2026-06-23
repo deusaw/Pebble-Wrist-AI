@@ -734,14 +734,14 @@ function ttsFetchNext(ttsApiKey, sessionId) {
 }
 
 // LOOP 2：从音频队列取 raw PCM 数据 → 分块入 amQueue 串行发送
-// 投递速度由 processAmQueue 的 15ms 串行间隔自然限速（~46k B/s），远超手表消费（8000 B/s），
+// 投递速度由 processAmQueue 的 15ms 串行间隔自然限速（350B/15ms≈23k B/s），
+// 仍显著高于手表消费（8000 B/s），但 PAUSE 往返期间的在途数据比 700B chunk 减半。
 // 缓冲会填满 → watch 发 TTS_PAUSE → 停止投递。溢出由流控根治，无需 JS 端 watermark 限速。
 // 之前的 watermark=3 + 300ms 等待会把平均投递速度压到 ~5800 B/s < 消费 8000 B/s，
 // 导致稳态缓冲单调下降见底 → 一字一顿。现已移除该限速。
-// 保留一个高水位安全阀（防 amQueue 在 PAUSE 往返延迟期间无限堆积），但设得很高、等待很短，
-// 正常流程下不会触发。
-var TTS_AMQUEUE_SAFETY_LIMIT = 12; // amQueue 待发 TTS chunk 安全上限（防 PAUSE 往返期间无限堆积）
-var TTS_CHUNK_SIZE = 700;        // chunk 大小（蓝牙单包 data 槽足够）
+// 保留一个短等待背压阀：只限制 amQueue 积压，不把实际发送速率压到消费速度以下。
+var TTS_AMQUEUE_SAFETY_LIMIT = 8; // amQueue 待发 TTS chunk 安全上限（防 PAUSE 往返期间无限堆积）
+var TTS_CHUNK_SIZE = 350;        // chunk 更细，降低 PAUSE 后在途音频，仍保留 >2x 消费吞吐
 var ttsCurrentSentence = null;   // 正在分块发送的句子（字节组）
 var ttsCurrentOffset = 0;        // 当前句子已发送到的字节偏移
 

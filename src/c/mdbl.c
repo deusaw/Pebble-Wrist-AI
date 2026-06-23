@@ -179,8 +179,8 @@ static int32_t s_active_minutes = 0;
 // Emery 专属 TTS 参数 — 充分利用 Pebble Time 2 的更强 CPU。
 // 调度和功耗不是问题，优先流畅度。非 Emery 平台无 TTS，不受影响。
 // 内存约束：app 虚拟大小 ≤ 65535（uint16 上限）。basalt 基础 RAM ~18KB，
-// Emery 额外 BSS ≈ ring + 900B，故 ring ≤ 65535 - 18000 - 900 ≈ 46635。
-// 取 40KB（40960）留 ~5.7KB 安全余量。
+// Emery 额外 BSS ≈ ring + 1.7KB，故 ring ≤ 65535 - 18000 - 1700 ≈ 45835。
+// 取 40KB（40960）留 ~4.8KB 安全余量。
 #define TTS_RING_SIZE        40960  // 环形缓冲 40KB（受 app 虚拟大小 65535 上限约束）
 #define TTS_DECODE_BYTES     800    // 每次播放 100ms 音频（800B = 100ms × 8000B/s），更细粒度减少单次卡顿时长
 #define TTS_PLAYBACK_MS      100    // 播放定时器 100ms（与 DECODE_BYTES 严格匹配：800B/100ms=8000B/s）
@@ -188,18 +188,21 @@ static int32_t s_active_minutes = 0;
 #define TTS_CLOSE_DELAY_MS   1500   // 句间延迟关闭扬声器
 #define TTS_WATCHDOG_MS      30000  // TTS 看门狗：30s 无任何 chunk/done 则超时清理
 // 流控水位线（watch→JS 暂停/恢复）。
-// raw PCM 8000 B/s 消费，蓝牙投递 ~46k B/s（processAmQueue 15ms 串行）。
+// raw PCM 8000 B/s 消费，蓝牙投递约 23k B/s（350B chunk / processAmQueue 15ms）。
 // JS 全速投递，靠 watch PAUSE/RESUME 控水位。
 // LOW=20000（2.5s 跑道）：蓝牙丢包 2.5 秒内缓冲不会见底（8000×2.5=20000）。
-// HIGH=30000：HIGH + 在途（~9800B）= 39800 < 40960 ✓（余量 1160B）。
-// HIGH-LOW=10000B=1.25s 消费周期，PAUSE/RESUME 频率适中。
-#define TTS_PAUSE_HIGH       30000  // 缓冲≥此值 → 发 TTS_PAUSE
+// HIGH=25000：给 PAUSE 往返和 JS 在途 chunk 留 ~16KB 余量，优先避免溢出丢音频。
+// HIGH-LOW=5000B=0.625s 消费周期；Emery 调度/功耗可接受，流畅度优先。
+#define TTS_PAUSE_HIGH       25000  // 缓冲≥此值 → 发 TTS_PAUSE
 #define TTS_RESUME_LOW       20000  // 缓冲≤此值 → 发 TTS_RESUME（2.5s 播放跑道防 underrun）
 
 static uint8_t s_tts_ring[TTS_RING_SIZE];
 static uint32_t s_tts_head = 0;
 static uint32_t s_tts_tail = 0;
 static uint32_t s_tts_count = 0;
+static int8_t s_tts_pending_write_buf[TTS_DECODE_BYTES];
+static uint16_t s_tts_pending_write_len = 0;
+static uint16_t s_tts_pending_write_offset = 0;
 static bool s_tts_playing = false;       // 是否正在播放（含缓冲中）
 static bool s_tts_loading = false;       // TTS 已请求、等待首个音频块期间
 static bool s_tts_all_sent = false;      // JS 已发完所有数据（TTS_DONE 到达），等缓冲排空后置 playing=false
@@ -306,11 +309,55 @@ static void tts_cancel_close_timer(void) {
   }
 }
 
+static void tts_clear_pending_write(void) {
+  s_tts_pending_write_len = 0;
+  s_tts_pending_write_offset = 0;
+}
+
+static bool tts_write_or_buffer(const int8_t *samples, uint16_t len) {
+  if (len == 0) return true;
+
+  uint32_t written = speaker_stream_write((uint8_t *)samples, len);
+  uint16_t accepted = (written > (uint32_t)len) ? len : (uint16_t)written;
+  if (accepted < len) {
+    uint16_t remaining = len - accepted;
+    memcpy(s_tts_pending_write_buf, samples + accepted, remaining);
+    s_tts_pending_write_len = remaining;
+    s_tts_pending_write_offset = 0;
+    APP_LOG(APP_LOG_LEVEL_WARNING, "TTS speaker short write %d/%d", (int)accepted, (int)len);
+    return false;
+  }
+  return true;
+}
+
+static bool tts_flush_pending_write(void) {
+  if (s_tts_pending_write_offset >= s_tts_pending_write_len) {
+    tts_clear_pending_write();
+    return true;
+  }
+
+  uint16_t remaining = s_tts_pending_write_len - s_tts_pending_write_offset;
+  uint32_t written = speaker_stream_write(
+    (uint8_t *)(s_tts_pending_write_buf + s_tts_pending_write_offset),
+    remaining
+  );
+  uint16_t accepted = (written > (uint32_t)remaining) ? remaining : (uint16_t)written;
+  s_tts_pending_write_offset += accepted;
+
+  if (s_tts_pending_write_offset < s_tts_pending_write_len) {
+    return false;
+  }
+
+  tts_clear_pending_write();
+  return true;
+}
+
 static void tts_delayed_close_callback(void *data) {
   s_tts_close_timer = NULL;
   if (s_tts_count == 0 && s_speaker_open) {
     speaker_stream_close();
     s_speaker_open = false;
+    tts_clear_pending_write();
     // 全部数据已发完且缓冲排空：朗读会话真正结束，置 playing=false 恢复按钮语义。
     // 句间停顿（all_sent 未置）时只关扬声器，保留 playing=true 让 SELECT 停止手势有效。
     if (s_tts_all_sent) {
@@ -331,6 +378,7 @@ static void tts_delayed_close_callback(void *data) {
     s_tts_count = 0;
     s_tts_head = 0;
     s_tts_tail = 0;
+    tts_clear_pending_write();
     speaker_stream_close();
     s_speaker_open = false;
     s_tts_playing = false;
@@ -434,6 +482,11 @@ static void tts_playback_timer_callback(void *data) {
 
   static int8_t s_out_buf[TTS_DECODE_BYTES];
 
+  if (!tts_flush_pending_write()) {
+    s_tts_playback_timer = app_timer_register(10, tts_playback_timer_callback, NULL);
+    return;
+  }
+
   if (s_tts_count >= TTS_DECODE_BYTES) {
     // 满帧：800B raw PCM = 恰好 100ms 音频，无缝衔接下一个 100ms 定时
     for (int i = 0; i < TTS_DECODE_BYTES; i++) {
@@ -446,8 +499,11 @@ static void tts_playback_timer_callback(void *data) {
       if (scaled < -128) scaled = -128;
       s_out_buf[i] = (int8_t)scaled;
     }
-    speaker_stream_write((uint8_t *)s_out_buf, TTS_DECODE_BYTES);
-    s_tts_playback_timer = app_timer_register(TTS_PLAYBACK_MS, tts_playback_timer_callback, NULL);
+    if (tts_write_or_buffer(s_out_buf, TTS_DECODE_BYTES)) {
+      s_tts_playback_timer = app_timer_register(TTS_PLAYBACK_MS, tts_playback_timer_callback, NULL);
+    } else {
+      s_tts_playback_timer = app_timer_register(10, tts_playback_timer_callback, NULL);
+    }
 
     // 流控恢复：消费一帧后缓冲已降到 LOW 以下 → 通知 JS 继续投递。
     // 放这里（而非 tts_push）是因为 RESUME 取决于消费进度，只有播放定时器知道。
@@ -470,13 +526,16 @@ static void tts_playback_timer_callback(void *data) {
         if (scaled < -128) scaled = -128;
         s_out_buf[i] = (int8_t)scaled;
       }
-      speaker_stream_write((uint8_t *)s_out_buf, decode_count);
-      // 缓冲已空，由 close 回调收尾
-      tts_schedule_close_timer();
+      if (tts_write_or_buffer(s_out_buf, decode_count)) {
+        // 缓冲已空，由 close 回调收尾
+        tts_schedule_close_timer();
+      } else {
+        s_tts_playback_timer = app_timer_register(10, tts_playback_timer_callback, NULL);
+      }
     } else {
       // 还有数据在路上：10ms 后重试，不写半帧（避免静音间隙）。
       // 100ms 帧长下 10ms 重试 = 帧长的 10%，Emery CPU 足够支撑。
-      // 10ms 内消费 80B、蓝牙可达 ~700B，一两次重试即可凑满一帧。
+      // 蓝牙继续补包时，一两次重试通常即可凑满一帧。
       s_tts_playback_timer = app_timer_register(10, tts_playback_timer_callback, NULL);
       tts_schedule_close_timer();  // 兜底：若后续数据不再来，超时关闭
     }
@@ -499,6 +558,7 @@ static void tts_stop(void) {
   s_tts_head = 0;
   s_tts_tail = 0;
   s_tts_count = 0;
+  tts_clear_pending_write();
   s_tts_playing = false;
   s_tts_loading = false;
   s_tts_all_sent = false;
