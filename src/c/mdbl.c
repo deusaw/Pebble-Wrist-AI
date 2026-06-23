@@ -520,15 +520,8 @@ static void tts_playback_timer_callback(void *data) {
 
   static int8_t s_out_buf[TTS_DECODE_BYTES];
 
-  bool had_pending_write = (s_tts_pending_write_offset < s_tts_pending_write_len);
   if (!tts_flush_pending_write()) {
     s_tts_playback_timer = app_timer_register(10, tts_playback_timer_callback, NULL);
-    return;
-  }
-  if (had_pending_write) {
-    // 短写 flush 完后不要在同一 callback 继续抽 ring。
-    // 否则 ring 会被快速搬进 speaker FIFO/pending，失去作为蓝牙抗抖缓冲的意义。
-    s_tts_playback_timer = app_timer_register(TTS_PLAYBACK_MS, tts_playback_timer_callback, NULL);
     return;
   }
 
