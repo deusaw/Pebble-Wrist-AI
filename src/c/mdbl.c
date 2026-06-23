@@ -187,7 +187,7 @@ static int32_t s_active_minutes = 0;
 #define TTS_PLAYBACK_MS      100    // speaker pump 间隔；写入量大于间隔播放量，靠 stream 短写自然背压
 #define TTS_START_THRESHOLD  12000  // 开播预缓冲 1.5s（用户不介意等，大缓冲扛蓝牙波动），须 < LOW
 #define TTS_CLOSE_DELAY_MS   1500   // 句间延迟关闭扬声器
-#define TTS_WATCHDOG_MS      30000  // TTS 看门狗：30s 无任何 chunk/done 则超时清理
+#define TTS_WATCHDOG_MS      60000  // TTS 看门狗：全量预编码可能等待较久，60s 无 chunk/done 才清理
 #define TTS_FLOW_RETRY_MS    120    // PAUSE/RESUME outbox 忙/失败时快速重试，避免 JS 卡在暂停态
 // 流控水位线（watch→JS 暂停/恢复）。
 // raw PCM 8000 B/s 消费，蓝牙投递约 23k B/s（350B chunk / processAmQueue 15ms）。
