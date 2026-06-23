@@ -1142,7 +1142,9 @@ Pebble.addEventListener('showConfiguration', function() {
     + '&health_enabled=' + encodeURIComponent(getSetting('health_enabled', '0'))
     + '&has_tts_key=' + (getSetting('tts_api_key', '') ? '1' : '0')
     + '&tts_rate=' + encodeURIComponent(getSetting('tts_rate', '1.0'))
-    + '#export_data=' + encodeURIComponent(JSON.stringify(safeDocs));
+    // 用 escape() 而非 encodeURIComponent()：escape() 对中文直接编码为 %uXXXX（Unicode 码点），
+    // 不依赖 UTF-8 byte 序列，PebbleKit WebView 用任何字符集都能正确处理，不会出乱码。
+    + '#export_data=' + escape(JSON.stringify(safeDocs));
 
   Pebble.openURL(url);
 });
