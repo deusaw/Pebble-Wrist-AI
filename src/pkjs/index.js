@@ -742,6 +742,7 @@ function ttsFetchNext(ttsApiKey, sessionId) {
 // 保留一个短等待背压阀：只限制 amQueue 积压，不把实际发送速率压到消费速度以下。
 var TTS_AMQUEUE_SAFETY_LIMIT = 8; // amQueue 待发 TTS chunk 安全上限（防 PAUSE 往返期间无限堆积）
 var TTS_CHUNK_SIZE = 350;        // chunk 更细，降低 PAUSE 后在途音频，仍保留 >2x 消费吞吐
+var TTS_PAUSE_STALE_MS = 1000;   // RESUME 丢失兜底；C 端会重试，JS 这里只防极端死锁
 var ttsCurrentSentence = null;   // 正在分块发送的句子（字节组）
 var ttsCurrentOffset = 0;        // 当前句子已发送到的字节偏移
 
@@ -758,15 +759,15 @@ function ttsSendNext(sessionId) {
 
   // 手表流控：缓冲水位过高时发来 TTS_PAUSE，停止投递新 chunk。
   // 已在 amQueue 里或正在发的 chunk 会自然发完（不截断半句，避免音频缺口）。
-  // 防 stale PAUSE 死锁：挂 2s 自动恢复检查。正常情况 TTS_RESUME 在 300-500ms 内到达唤醒；
-  // 若 2s 仍暂停（旧 session 的 stale PAUSE），自动清除暂停继续投递，避免等 30s watchdog。
+  // 防 stale PAUSE 死锁：正常情况由手表 TTS_RESUME 唤醒；若 RESUME 仍丢失，
+  // 1s 后自动清除暂停继续投递，避免形成录音里那种 2s 级静音洞。
   if (ttsPaused) {
     setTimeout(function() {
       if (sessionId === ttsSessionId && ttsPaused) {
         ttsPaused = false;
         ttsSendNext(sessionId);
       }
-    }, 2000);
+    }, TTS_PAUSE_STALE_MS);
     return;
   }
 
@@ -911,7 +912,7 @@ Pebble.addEventListener('appmessage', function(e) {
   // ── TTS 流控（手表环形缓冲水位信号）──
   // PAUSE：手表缓冲接近溢出，停止投递新 chunk；RESUME：缓冲已排空到安全线，继续投递。
   // 防 stale PAUSE 死锁：cancelTTS/startTTS 置 ttsPaused=false，但旧 session 的在途 PAUSE
-  // 可能在新 session 启动后到达，错误暂停新 session。ttsSendNext 里 ttsPaused 检查带 2s
+  // 可能在新 session 启动后到达，错误暂停新 session。ttsSendNext 里 ttsPaused 检查带 1s
   // 自动恢复兜底（无 RESUME 到达则清除暂停），避免永久死锁等 watchdog。
   if (typeof e.payload['TTS_PAUSE'] !== 'undefined') {
     ttsPaused = true;

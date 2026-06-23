@@ -188,6 +188,7 @@ static int32_t s_active_minutes = 0;
 #define TTS_START_THRESHOLD  12000  // 开播预缓冲 1.5s（用户不介意等，大缓冲扛蓝牙波动），须 < LOW
 #define TTS_CLOSE_DELAY_MS   1500   // 句间延迟关闭扬声器
 #define TTS_WATCHDOG_MS      30000  // TTS 看门狗：30s 无任何 chunk/done 则超时清理
+#define TTS_FLOW_RETRY_MS    120    // PAUSE/RESUME outbox 忙/失败时快速重试，避免 JS 卡在暂停态
 // 流控水位线（watch→JS 暂停/恢复）。
 // raw PCM 8000 B/s 消费，蓝牙投递约 23k B/s（350B chunk / processAmQueue 15ms）。
 // JS 全速投递，靠 watch PAUSE/RESUME 控水位。
@@ -213,6 +214,8 @@ static int s_tts_volume = 100;           // 0-100
 static AppTimer *s_tts_playback_timer = NULL;
 static AppTimer *s_tts_close_timer = NULL;
 static AppTimer *s_tts_watchdog_timer = NULL;
+static AppTimer *s_tts_flow_retry_timer = NULL;
+static bool s_tts_flow_retry_pause = false;
 #endif
 
 // ── TTS 音量指示器（仅 Emery，调节音量时显示 2 秒）─────────────────────────
@@ -315,6 +318,13 @@ static void tts_clear_pending_write(void) {
   s_tts_pending_write_offset = 0;
 }
 
+static void tts_cancel_flow_retry(void) {
+  if (s_tts_flow_retry_timer) {
+    app_timer_cancel(s_tts_flow_retry_timer);
+    s_tts_flow_retry_timer = NULL;
+  }
+}
+
 static bool tts_write_or_buffer(const int8_t *samples, uint16_t len) {
   if (len == 0) return true;
 
@@ -365,6 +375,7 @@ static void tts_delayed_close_callback(void *data) {
       s_tts_playing = false;
       s_tts_loading = false;
       s_tts_all_sent = false;
+      tts_cancel_flow_retry();
       layer_mark_dirty(s_canvas_layer);
       if (s_tts_watchdog_timer) {
         app_timer_cancel(s_tts_watchdog_timer);
@@ -385,6 +396,7 @@ static void tts_delayed_close_callback(void *data) {
     s_tts_playing = false;
     s_tts_loading = false;
     s_tts_paused = false;
+    tts_cancel_flow_retry();
     layer_mark_dirty(s_canvas_layer);
     if (s_tts_watchdog_timer) {
       app_timer_cancel(s_tts_watchdog_timer);
@@ -419,12 +431,33 @@ static void tts_reset_watchdog(void) {
 
 // 向 JS 发送流控信号（PAUSE/RESUME）。outbox 单槽，但这是 watch→JS 方向，
 // 与 JS→watch 的 TTS chunk（走 inbox）不竞争同一槽，不会卡住数据流。
+static void tts_flow_retry_callback(void *data);
+
+static void tts_schedule_flow_retry(bool pause) {
+  s_tts_flow_retry_pause = pause;
+  tts_cancel_flow_retry();
+  s_tts_flow_retry_timer = app_timer_register(TTS_FLOW_RETRY_MS, tts_flow_retry_callback, NULL);
+}
+
 static void tts_send_flow_control(bool pause) {
   DictionaryIterator *iter;
-  if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
+  AppMessageResult result = app_message_outbox_begin(&iter);
+  if (result == APP_MSG_OK) {
     dict_write_uint8(iter, pause ? MESSAGE_KEY_TTS_PAUSE : MESSAGE_KEY_TTS_RESUME, 1);
-    app_message_outbox_send();
+    result = app_message_outbox_send();
+    if (result == APP_MSG_OK) {
+      tts_cancel_flow_retry();
+      return;
+    }
   }
+  APP_LOG(APP_LOG_LEVEL_WARNING, "TTS flow %s send deferred: %d", pause ? "PAUSE" : "RESUME", (int)result);
+  tts_schedule_flow_retry(pause);
+}
+
+static void tts_flow_retry_callback(void *data) {
+  s_tts_flow_retry_timer = NULL;
+  if (!s_tts_playing && !s_tts_loading) return;
+  tts_send_flow_control(s_tts_flow_retry_pause);
 }
 
 // 把收到的 raw PCM 字节推入环形缓冲
@@ -569,6 +602,7 @@ static void tts_stop(void) {
   s_tts_loading = false;
   s_tts_all_sent = false;
   s_tts_paused = false;       // 重置流控状态：停止时不再处于暂停态
+  tts_cancel_flow_retry();
   if (s_tts_watchdog_timer) {
     app_timer_cancel(s_tts_watchdog_timer);
     s_tts_watchdog_timer = NULL;
@@ -1593,6 +1627,15 @@ static void outbox_failed(DictionaryIterator *iter, AppMessageResult reason, voi
     return;
   }
 #if defined(PBL_PLATFORM_EMERY)
+  Tuple *tts_pause_t = dict_find(iter, MESSAGE_KEY_TTS_PAUSE);
+  Tuple *tts_resume_t = dict_find(iter, MESSAGE_KEY_TTS_RESUME);
+  if (tts_pause_t || tts_resume_t) {
+    bool pause = (tts_pause_t != NULL);
+    APP_LOG(APP_LOG_LEVEL_WARNING, "TTS flow %s failed, retrying", pause ? "PAUSE" : "RESUME");
+    tts_schedule_flow_retry(pause);
+    return;
+  }
+
   // TTS_REQUEST 异步发送失败：清理 TTS 状态，防止 s_tts_playing 卡死导致按钮瘫痪。
   // 利用 s_tts_playing 与问答 SENDING 状态互斥区分消息类型（TTS_REQUEST 发出时
   // s_tts_playing=true，问答 SENDING 状态下 s_tts_playing=false），无需读 iter。
