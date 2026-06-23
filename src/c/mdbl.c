@@ -179,11 +179,12 @@ static int32_t s_active_minutes = 0;
 // Emery 专属 TTS 参数 — 充分利用 Pebble Time 2 的更强 CPU。
 // 调度和功耗不是问题，优先流畅度。非 Emery 平台无 TTS，不受影响。
 // 内存约束：app 虚拟大小 ≤ 65535（uint16 上限）。basalt 基础 RAM ~18KB，
-// Emery 额外 BSS ≈ ring + 1.7KB，故 ring ≤ 65535 - 18000 - 1700 ≈ 45835。
-// 取 40KB（40960）留 ~4.8KB 安全余量。
+// Emery 额外 BSS ≈ ring + 3.3KB，故 ring ≤ 65535 - 18000 - 3300 ≈ 44235。
+// 取 40KB（40960）留 ~3.3KB 安全余量。
 #define TTS_RING_SIZE        40960  // 环形缓冲 40KB（受 app 虚拟大小 65535 上限约束）
-#define TTS_DECODE_BYTES     800    // 每次播放 100ms 音频（800B = 100ms × 8000B/s），更细粒度减少单次卡顿时长
-#define TTS_PLAYBACK_MS      100    // 播放定时器 100ms（与 DECODE_BYTES 严格匹配：800B/100ms=8000B/s）
+#define TTS_DECODE_BYTES     1600   // 每次最多写入 200ms 音频，让 speaker FIFO 吸收 AppTimer 抖动
+#define TTS_MIN_WRITE_BYTES  800    // 非流尾至少写 100ms，避免过碎写入造成断续
+#define TTS_PLAYBACK_MS      100    // speaker pump 间隔；写入量大于间隔播放量，靠 stream 短写自然背压
 #define TTS_START_THRESHOLD  12000  // 开播预缓冲 1.5s（用户不介意等，大缓冲扛蓝牙波动），须 < LOW
 #define TTS_CLOSE_DELAY_MS   1500   // 句间延迟关闭扬声器
 #define TTS_WATCHDOG_MS      30000  // TTS 看门狗：30s 无任何 chunk/done 则超时清理
@@ -472,10 +473,9 @@ static void tts_start_playback(void) {
   }
 }
 
-// 关键：绝不在缓冲不足一帧（800B=100ms 音频）时做"半帧写入"。
-// 缓冲在波动时会写入 < 100ms 的音频再等 100ms → 帧间静音间隙 → 断续。
-// 满帧才写；不足一帧时 10ms 后重试等填满；仅当整句已全部到达（all_sent）
-// 时才把尾料（< 800B）一次性冲掉。
+// 关键：speaker_stream_write 本身会按 PCM 采样率播放；这里的 timer 只是 pump，
+// 不是精确播放时钟。每次尽量写入 100-200ms 音频，让 speaker 内部 FIFO 覆盖
+// AppTimer/AppMessage 抖动；短写则保留未写入部分，10ms 后继续补。
 static void tts_playback_timer_callback(void *data) {
   s_tts_playback_timer = NULL;
   if (!s_speaker_open) return;
@@ -487,9 +487,15 @@ static void tts_playback_timer_callback(void *data) {
     return;
   }
 
+  uint16_t decode_count = 0;
   if (s_tts_count >= TTS_DECODE_BYTES) {
-    // 满帧：800B raw PCM = 恰好 100ms 音频，无缝衔接下一个 100ms 定时
-    for (int i = 0; i < TTS_DECODE_BYTES; i++) {
+    decode_count = TTS_DECODE_BYTES;
+  } else if (s_tts_count >= TTS_MIN_WRITE_BYTES) {
+    decode_count = (uint16_t)s_tts_count;
+  }
+
+  if (decode_count > 0) {
+    for (int i = 0; i < decode_count; i++) {
       int8_t sample = (int8_t)s_tts_ring[s_tts_head];
       s_tts_head = (s_tts_head + 1) % TTS_RING_SIZE;
       s_tts_count--;
@@ -499,7 +505,7 @@ static void tts_playback_timer_callback(void *data) {
       if (scaled < -128) scaled = -128;
       s_out_buf[i] = (int8_t)scaled;
     }
-    if (tts_write_or_buffer(s_out_buf, TTS_DECODE_BYTES)) {
+    if (tts_write_or_buffer(s_out_buf, decode_count)) {
       s_tts_playback_timer = app_timer_register(TTS_PLAYBACK_MS, tts_playback_timer_callback, NULL);
     } else {
       s_tts_playback_timer = app_timer_register(10, tts_playback_timer_callback, NULL);
