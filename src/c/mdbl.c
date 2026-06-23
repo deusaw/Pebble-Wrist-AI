@@ -186,8 +186,9 @@ static int32_t s_active_minutes = 0;
 // 调度和功耗不是问题，优先流畅度。非 Emery 平台无 TTS，不受影响。
 // 内存约束：app 虚拟大小 ≤ 65535（uint16 上限）。basalt 基础 RAM ~18KB，
 // Emery 额外 BSS ≈ ring + 3.3KB，故 ring ≤ 65535 - 18000 - 3300 ≈ 44235。
-// 取 39KB（39936），留足余量给 s_out_buf(1600) + pending(1600) + 其他 BSS。
-#define TTS_RING_SIZE        39936  // 环形缓冲 39KB（受 app 虚拟大小 65535 上限约束）
+// 新增音量菜单/滚动保护后虚拟大小再次逼近 65535；取 36KB 给代码留编译余量。
+// HIGH=32000 时距满约 4.75KB，仍覆盖 PAUSE 往返期间的在途 chunk。
+#define TTS_RING_SIZE        36864  // 环形缓冲 36KB（受 app 虚拟大小 65535 上限约束）
 #define TTS_DECODE_BYTES     1600   // 每次最多写入 200ms 音频，让 speaker FIFO 吸收 AppTimer 抖动
 #define TTS_MIN_WRITE_BYTES  800    // 非流尾至少写 100ms，避免过碎写入造成断续
 #define TTS_PLAYBACK_MS      100    // speaker pump 间隔；JS 发送速率需高于 pump 速率，避免抽干 ring
@@ -199,7 +200,7 @@ static int32_t s_active_minutes = 0;
 // 流控水位线（watch→JS 暂停/恢复）。
 // raw PCM 8000 B/s 消费；JS 正常约 8.14KB/s 恒速投递，PAUSE 后约 7KB/s 轻降速。
 // 正常播放不再依赖 PAUSE/RESUME 周期，反馈流控只作为接近满缓冲时的保险。
-// LOW=26000（3.25s 跑道），HIGH=32000（距 ring 满约 8KB），防蓝牙抖动时见底或溢出。
+// LOW=26000（3.25s 跑道），HIGH=32000（距 ring 满约 4.75KB），防蓝牙抖动时见底或溢出。
 #define TTS_PAUSE_HIGH       32000  // 缓冲≥此值 → 发 TTS_PAUSE（应急轻降速）
 #define TTS_RESUME_LOW       26000  // 缓冲≤此值 → 发 TTS_RESUME（低水位/补货信号）
 #define TTS_VOLUME_MIN       10
