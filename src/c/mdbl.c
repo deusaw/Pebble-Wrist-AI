@@ -192,11 +192,11 @@ static int32_t s_active_minutes = 0;
 // 流控水位线（watch→JS 暂停/恢复）。
 // raw PCM 8000 B/s 消费，蓝牙投递约 23k B/s（350B chunk / processAmQueue 15ms）。
 // JS 全速投递，靠 watch PAUSE/RESUME 控水位。
-// LOW=20000（2.5s 跑道）：蓝牙丢包 2.5 秒内缓冲不会见底（8000×2.5=20000）。
-// HIGH=25000：给 PAUSE 往返和 JS 在途 chunk 留 ~16KB 余量，优先避免溢出丢音频。
-// HIGH-LOW=5000B=0.625s 消费周期；Emery 调度/功耗可接受，流畅度优先。
-#define TTS_PAUSE_HIGH       25000  // 缓冲≥此值 → 发 TTS_PAUSE
-#define TTS_RESUME_LOW       20000  // 缓冲≤此值 → 发 TTS_RESUME（2.5s 播放跑道防 underrun）
+// LOW=16000（2.0s 跑道）：蓝牙短抖动 2 秒内缓冲不会见底（8000×2=16000）。
+// HIGH=22000：给 PAUSE 往返和 JS 在途 chunk 留 ~18KB 余量，优先避免溢出丢音频。
+// HIGH-LOW=6000B=0.75s 消费周期；全量预编码后不再依赖高水位吞吐突发。
+#define TTS_PAUSE_HIGH       22000  // 缓冲≥此值 → 发 TTS_PAUSE
+#define TTS_RESUME_LOW       16000  // 缓冲≤此值 → 发 TTS_RESUME（2s 播放跑道防 underrun）
 
 static uint8_t s_tts_ring[TTS_RING_SIZE];
 static uint32_t s_tts_head = 0;
@@ -209,6 +209,7 @@ static bool s_tts_playing = false;       // 是否正在播放（含缓冲中）
 static bool s_tts_loading = false;       // TTS 已请求、等待首个音频块期间
 static bool s_tts_all_sent = false;      // JS 已发完所有数据（TTS_DONE 到达），等缓冲排空后置 playing=false
 static bool s_tts_paused = false;        // 已向 JS 发出 TTS_PAUSE、等待缓冲排空到 LOW 再 RESUME
+static bool s_tts_overflow_logged = false;
 static bool s_speaker_open = false;
 static int s_tts_volume = 100;           // 0-100
 static AppTimer *s_tts_playback_timer = NULL;
@@ -335,7 +336,6 @@ static bool tts_write_or_buffer(const int8_t *samples, uint16_t len) {
     memcpy(s_tts_pending_write_buf, samples + accepted, remaining);
     s_tts_pending_write_len = remaining;
     s_tts_pending_write_offset = 0;
-    APP_LOG(APP_LOG_LEVEL_WARNING, "TTS speaker short write %d/%d", (int)accepted, (int)len);
     return false;
   }
   return true;
@@ -470,7 +470,10 @@ static void tts_push(const uint8_t *data, uint16_t len) {
     } else {
       // 缓冲溢出：流控 PAUSE 往返期间在途 chunk 超出预期余量。
       // 记日志便于诊断（正常不应触发；触发则需调大 RING/HIGH 或减小 watermark）。
-      APP_LOG(APP_LOG_LEVEL_WARNING, "TTS ring overflow, dropping %d bytes", (int)(len - i));
+      if (!s_tts_overflow_logged) {
+        APP_LOG(APP_LOG_LEVEL_WARNING, "TTS ring overflow, dropping %d bytes", (int)(len - i));
+        s_tts_overflow_logged = true;
+      }
       break;
     }
   }
@@ -601,6 +604,7 @@ static void tts_stop(void) {
   s_tts_loading = false;
   s_tts_all_sent = false;
   s_tts_paused = false;       // 重置流控状态：停止时不再处于暂停态
+  s_tts_overflow_logged = false;
   tts_cancel_flow_retry();
   if (s_tts_watchdog_timer) {
     app_timer_cancel(s_tts_watchdog_timer);

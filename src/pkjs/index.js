@@ -766,7 +766,7 @@ function ttsFetchNext(ttsApiKey, sessionId) {
 // 保留一个短等待背压阀：只限制 amQueue 积压，不把实际发送速率压到消费速度以下。
 var TTS_AMQUEUE_SAFETY_LIMIT = 8; // amQueue 待发 TTS chunk 安全上限（防 PAUSE 往返期间无限堆积）
 var TTS_CHUNK_SIZE = 350;        // chunk 更细，降低 PAUSE 后在途音频，仍保留 >2x 消费吞吐
-var TTS_SEND_DELAY_MS = 20;      // 350B/20ms≈17.5KB/s，高于 1600B/100ms pump，避免抽干 ring
+var TTS_SEND_DELAY_MS = 40;      // 350B/40ms≈8.75KB/s，略高于真实播放 8KB/s，避免灌爆 ring
 var TTS_PAUSE_STALE_MS = 1000;   // RESUME 丢失兜底；C 端会重试，JS 这里只防极端死锁
 var ttsCurrentSentence = null;   // 正在分块发送的句子（字节组）
 var ttsCurrentOffset = 0;        // 当前句子已发送到的字节偏移
