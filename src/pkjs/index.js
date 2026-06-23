@@ -156,6 +156,7 @@ var amQueue = [];
 var amSending = false;
 var AM_RETRY_DELAY_MS = 500;
 var TTS_STREAM_RETRY_DELAY_MS = 120; // TTS 流消息失败多为蓝牙/收件箱瞬时忙，500ms 会直接变成可闻大空洞
+var TTS_STREAM_MAX_RETRIES = 80;     // 约 9.6s 内不丢音频块；宁可等待也不要挖掉 PCM
 
 function isTTSStreamPayload(payload) {
   return typeof payload['TTS_CHUNK'] !== 'undefined' ||
@@ -171,7 +172,7 @@ function processAmQueue() {
   // TTS 流消息丢一个会产生音频缺口；给更多重试机会，但重试间隔必须短。
   // 旧的 500ms backoff 连续几次失败会直接变成 2s+ 大空洞。
   var isTTSStream = isTTSStreamPayload(item.payload);
-  var maxRetries = isTTSStream ? 8 : 3;
+  var maxRetries = isTTSStream ? TTS_STREAM_MAX_RETRIES : 3;
   var retryDelay = isTTSStream ? TTS_STREAM_RETRY_DELAY_MS : AM_RETRY_DELAY_MS;
   Pebble.sendAppMessage(
     item.payload,
@@ -552,6 +553,7 @@ var ttsSentenceQueue = [];
 var ttsAudioQueue = [];
 var ttsPaused = false;        // 手表环形缓冲水位过高时发 TTS_PAUSE，置 true 后软降速；TTS_RESUME 恢复
 var ttsPauseSince = 0;        // PAUSE 到达时间；RESUME 丢失时用于自动退出软降速
+var ttsBoostUntil = 0;        // 低水位/underrun 后临时加速补货的截止时间
 // 顺序保证：并发预取时 TTS 响应可能乱序到达。用序号 + 待发 map 保证按原始句序入队。
 var ttsNextSeq = 0;           // 下一个待编码的句序号（ttsFetchNext 取走时分配）
 var ttsNextDeliver = 0;       // 下一个待投递的句序号（按序检查 pendingDeliveries）
@@ -570,6 +572,7 @@ function cancelTTS() {
   ttsCurrentOffset = 0;
   ttsPaused = false;          // 取消时清除流控暂停态，下次 startTTS 干净开始
   ttsPauseSince = 0;
+  ttsBoostUntil = 0;
   ttsNextSeq = 0;
   ttsNextDeliver = 0;
   ttsPendingDeliveries = {};
@@ -635,6 +638,7 @@ function startTTS() {
   ttsFetchingCount = 0;       // 重置并发计数
   ttsPaused = false;          // 新请求：清除上一次可能残留的流控暂停态
   ttsPauseSince = 0;
+  ttsBoostUntil = 0;
   ttsNextSeq = 0;
   ttsNextDeliver = 0;
   ttsPendingDeliveries = {};
@@ -778,6 +782,8 @@ function ttsFetchNext(ttsApiKey, sessionId) {
 var TTS_AMQUEUE_SAFETY_LIMIT = 8; // amQueue 待发 TTS chunk 安全上限（防 PAUSE 往返期间无限堆积）
 var TTS_CHUNK_SIZE = 350;        // 单包适中，减少蓝牙消息数量，同时保持接近播放时钟的恒速投递
 var TTS_SEND_DELAY_MS = 43;      // 350B/43ms≈8.14KB/s，接近播放速率，避免水位大幅震荡
+var TTS_BOOST_SEND_DELAY_MS = 30; // 低水位/underrun 后≈11.7KB/s 短暂补货，缩短重启空洞
+var TTS_BOOST_MS = 5000;         // boost 只持续 5s，避免长期高吞吐重新触发 PAUSE 循环
 var TTS_SOFT_PAUSE_SEND_DELAY_MS = 50; // PAUSE 后轻降到≈7KB/s，不断流，只让 ring 缓慢回落
 var TTS_PAUSE_STALE_MS = 7000;   // RESUME 丢失兜底；轻降速足够安全，给 C 端时间降到 LOW
 var ttsCurrentSentence = null;   // 正在分块发送的句子（字节组）
@@ -796,7 +802,8 @@ function ttsSendNext(sessionId) {
 
   // PAUSE 是接近满缓冲时的保险，不是日常节拍器。轻降速持续足够久，
   // 让 ring 回到 LOW；若 RESUME 丢失，7s 后恢复正常恒速，避免永久慢喂导致见底。
-  if (ttsPaused && Date.now() - ttsPauseSince >= TTS_PAUSE_STALE_MS) {
+  var now = Date.now();
+  if (ttsPaused && now - ttsPauseSince >= TTS_PAUSE_STALE_MS) {
     ttsPaused = false;
     ttsPauseSince = 0;
   }
@@ -820,7 +827,12 @@ function ttsSendNext(sessionId) {
     sendToWatch({ 'TTS_CHUNK': chunk });
     ttsCurrentOffset = end;
     // 正常略高于消费；PAUSE 时软降速但不断流，避免大空洞。
-    var delay = ttsPaused ? TTS_SOFT_PAUSE_SEND_DELAY_MS : TTS_SEND_DELAY_MS;
+    var delay = TTS_SEND_DELAY_MS;
+    if (ttsPaused) {
+      delay = TTS_SOFT_PAUSE_SEND_DELAY_MS;
+    } else if (now < ttsBoostUntil) {
+      delay = TTS_BOOST_SEND_DELAY_MS;
+    }
     setTimeout(function() { ttsSendNext(sessionId); }, delay);
     return;
   }
@@ -946,12 +958,14 @@ Pebble.addEventListener('appmessage', function(e) {
   if (typeof e.payload['TTS_PAUSE'] !== 'undefined') {
     ttsPaused = true;
     ttsPauseSince = Date.now();
+    ttsBoostUntil = 0;
     return;
   }
   if (typeof e.payload['TTS_RESUME'] !== 'undefined') {
     ttsPaused = false;
     ttsPauseSince = 0;
-    // 唤醒可能正处于安全阀/队列等待中的发送循环。
+    ttsBoostUntil = Date.now() + TTS_BOOST_MS;
+    // RESUME 既表示从 PAUSE 恢复，也被 C 端用作 underrun/低水位补货信号。
     ttsSendNext(ttsSessionId);
     return;
   }

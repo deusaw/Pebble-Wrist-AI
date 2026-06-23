@@ -185,16 +185,17 @@ static int32_t s_active_minutes = 0;
 #define TTS_DECODE_BYTES     1600   // 每次最多写入 200ms 音频，让 speaker FIFO 吸收 AppTimer 抖动
 #define TTS_MIN_WRITE_BYTES  800    // 非流尾至少写 100ms，避免过碎写入造成断续
 #define TTS_PLAYBACK_MS      100    // speaker pump 间隔；JS 发送速率需高于 pump 速率，避免抽干 ring
-#define TTS_START_THRESHOLD  24000  // 开播预缓冲 3.0s，用启动等待换稳定播放，须 < LOW
+#define TTS_START_THRESHOLD  24000  // 首次开播预缓冲 3.0s，用启动等待换稳定播放
+#define TTS_RESTART_THRESHOLD 8000  // 中途断粮后只攒 1.0s 再恢复，避免 3-4s 重启空洞
 #define TTS_CLOSE_DELAY_MS   1500   // 句间延迟关闭扬声器
 #define TTS_WATCHDOG_MS      60000  // TTS 看门狗：全量预编码可能等待较久，60s 无 chunk/done 才清理
 #define TTS_FLOW_RETRY_MS    120    // PAUSE/RESUME outbox 忙/失败时快速重试，避免 JS 卡在暂停态
 // 流控水位线（watch→JS 暂停/恢复）。
 // raw PCM 8000 B/s 消费；JS 正常约 8.14KB/s 恒速投递，PAUSE 后约 7KB/s 轻降速。
 // 正常播放不再依赖 PAUSE/RESUME 周期，反馈流控只作为接近满缓冲时的保险。
-// LOW=28000（3.5s 跑道），HIGH=34000（距 ring 满约 6KB），防蓝牙抖动时见底或溢出。
-#define TTS_PAUSE_HIGH       34000  // 缓冲≥此值 → 发 TTS_PAUSE（应急轻降速）
-#define TTS_RESUME_LOW       28000  // 缓冲≤此值 → 发 TTS_RESUME（3.5s 播放跑道防 underrun）
+// LOW=26000（3.25s 跑道），HIGH=32000（距 ring 满约 8KB），防蓝牙抖动时见底或溢出。
+#define TTS_PAUSE_HIGH       32000  // 缓冲≥此值 → 发 TTS_PAUSE（应急轻降速）
+#define TTS_RESUME_LOW       26000  // 缓冲≤此值 → 发 TTS_RESUME（低水位/补货信号）
 
 static uint8_t s_tts_ring[TTS_RING_SIZE];
 static uint32_t s_tts_head = 0;
@@ -206,6 +207,7 @@ static uint16_t s_tts_pending_write_offset = 0;
 static bool s_tts_playing = false;       // 是否正在播放（含缓冲中）
 static bool s_tts_loading = false;       // TTS 已请求、等待首个音频块期间
 static bool s_tts_all_sent = false;      // JS 已发完所有数据（TTS_DONE 到达），等缓冲排空后置 playing=false
+static bool s_tts_started_playback = false; // 本轮 TTS 是否已经首次开播；用于区分首次阈值和中途重启阈值
 static bool s_tts_paused = false;        // 已向 JS 发出 TTS_PAUSE、等待缓冲排空到 LOW 再 RESUME
 static bool s_tts_overflow_logged = false;
 static bool s_speaker_open = false;
@@ -373,6 +375,7 @@ static void tts_delayed_close_callback(void *data) {
       s_tts_playing = false;
       s_tts_loading = false;
       s_tts_all_sent = false;
+      s_tts_started_playback = false;
       tts_cancel_flow_retry();
       layer_mark_dirty(s_canvas_layer);
       if (s_tts_watchdog_timer) {
@@ -393,6 +396,7 @@ static void tts_delayed_close_callback(void *data) {
     s_speaker_open = false;
     s_tts_playing = false;
     s_tts_loading = false;
+    s_tts_started_playback = false;
     s_tts_paused = false;
     tts_cancel_flow_retry();
     layer_mark_dirty(s_canvas_layer);
@@ -502,6 +506,7 @@ static void tts_start_playback(void) {
     }
     s_speaker_open = true;
   }
+  s_tts_started_playback = true;
   if (!s_tts_playback_timer) {
     s_tts_playback_timer = app_timer_register(TTS_PLAYBACK_MS, tts_playback_timer_callback, NULL);
   }
@@ -515,8 +520,15 @@ static void tts_playback_timer_callback(void *data) {
 
   static int8_t s_out_buf[TTS_DECODE_BYTES];
 
+  bool had_pending_write = (s_tts_pending_write_offset < s_tts_pending_write_len);
   if (!tts_flush_pending_write()) {
     s_tts_playback_timer = app_timer_register(10, tts_playback_timer_callback, NULL);
+    return;
+  }
+  if (had_pending_write) {
+    // 短写 flush 完后不要在同一 callback 继续抽 ring。
+    // 否则 ring 会被快速搬进 speaker FIFO/pending，失去作为蓝牙抗抖缓冲的意义。
+    s_tts_playback_timer = app_timer_register(TTS_PLAYBACK_MS, tts_playback_timer_callback, NULL);
     return;
   }
 
@@ -580,6 +592,10 @@ static void tts_playback_timer_callback(void *data) {
     }
   } else {
     // 缓冲空，安排延迟关闭
+    if (!s_tts_all_sent) {
+      // 中途 underrun：通知 JS 临时加速补货。复用 RESUME，避免新增 message key。
+      tts_send_flow_control(false);
+    }
     tts_schedule_close_timer();
   }
 }
@@ -601,6 +617,7 @@ static void tts_stop(void) {
   s_tts_playing = false;
   s_tts_loading = false;
   s_tts_all_sent = false;
+  s_tts_started_playback = false;
   s_tts_paused = false;       // 重置流控状态：停止时不再处于暂停态
   s_tts_overflow_logged = false;
   tts_cancel_flow_retry();
@@ -1562,8 +1579,9 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
         layer_mark_dirty(s_canvas_layer);
       }
       tts_push(tts_chunk_t->value->data, tts_chunk_t->length);
-      // 缓冲达到阈值后开始播放（speaker 已开也调，幂等重注册定时器防句间死锁）
-      if (s_tts_count >= TTS_START_THRESHOLD) {
+      // 首次开播攒足 3s；中途 underrun 后只需 1s 即可恢复，避免重启空洞过长。
+      uint32_t start_threshold = s_tts_started_playback ? TTS_RESTART_THRESHOLD : TTS_START_THRESHOLD;
+      if (s_tts_count >= start_threshold) {
         tts_start_playback();
       }
       tts_reset_watchdog();  // 收到数据，重置看门狗
@@ -1607,6 +1625,7 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
       s_tts_playing = false;
       s_tts_loading = false;
       s_tts_all_sent = false;
+      s_tts_started_playback = false;
       layer_mark_dirty(s_canvas_layer);
     }
   }
