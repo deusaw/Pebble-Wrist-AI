@@ -185,18 +185,17 @@ static int32_t s_active_minutes = 0;
 #define TTS_DECODE_BYTES     1600   // 每次最多写入 200ms 音频，让 speaker FIFO 吸收 AppTimer 抖动
 #define TTS_MIN_WRITE_BYTES  800    // 非流尾至少写 100ms，避免过碎写入造成断续
 #define TTS_PLAYBACK_MS      100    // speaker pump 间隔；JS 发送速率需高于 pump 速率，避免抽干 ring
-#define TTS_START_THRESHOLD  12000  // 开播预缓冲 1.5s（用户不介意等，大缓冲扛蓝牙波动），须 < LOW
+#define TTS_START_THRESHOLD  20000  // 开播预缓冲 2.5s，换更稳的蓝牙抖动余量，须 < LOW
 #define TTS_CLOSE_DELAY_MS   1500   // 句间延迟关闭扬声器
 #define TTS_WATCHDOG_MS      60000  // TTS 看门狗：全量预编码可能等待较久，60s 无 chunk/done 才清理
 #define TTS_FLOW_RETRY_MS    120    // PAUSE/RESUME outbox 忙/失败时快速重试，避免 JS 卡在暂停态
 // 流控水位线（watch→JS 暂停/恢复）。
-// raw PCM 8000 B/s 消费，蓝牙投递约 23k B/s（350B chunk / processAmQueue 15ms）。
-// JS 全速投递，靠 watch PAUSE/RESUME 控水位。
-// LOW=16000（2.0s 跑道）：蓝牙短抖动 2 秒内缓冲不会见底（8000×2=16000）。
-// HIGH=22000：给 PAUSE 往返和 JS 在途 chunk 留 ~18KB 余量，优先避免溢出丢音频。
-// HIGH-LOW=6000B=0.75s 消费周期；全量预编码后不再依赖高水位吞吐突发。
-#define TTS_PAUSE_HIGH       22000  // 缓冲≥此值 → 发 TTS_PAUSE
-#define TTS_RESUME_LOW       16000  // 缓冲≤此值 → 发 TTS_RESUME（2s 播放跑道防 underrun）
+// raw PCM 8000 B/s 消费；JS 正常约 8.75KB/s 定速投递，PAUSE 后约 4.1KB/s 软降速。
+// LOW=24000（3.0s 跑道）：即使 RESUME 或若干 chunk 重试抖动，也不容易见底。
+// HIGH=30000：在 39KB ring 中仍留 ~10KB 余量；JS 已改为定速/软暂停，不再全速灌爆。
+// HIGH-LOW=6000B=0.75s 消费周期；PAUSE 只触发 JS 降速，不再硬停投递。
+#define TTS_PAUSE_HIGH       30000  // 缓冲≥此值 → 发 TTS_PAUSE（JS 软降速）
+#define TTS_RESUME_LOW       24000  // 缓冲≤此值 → 发 TTS_RESUME（3s 播放跑道防 underrun）
 
 static uint8_t s_tts_ring[TTS_RING_SIZE];
 static uint32_t s_tts_head = 0;
@@ -1572,14 +1571,17 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     }
   }
 
-  // TTS 结束标记：若缓冲还没开播，立即开播把剩余放完
+  // 单句结束标记：只重置看门狗，不绕过开播阈值。
+  // TTS_END 是每一句的边界，不代表整段 TTS 已全部到达；如果这里立即开播，
+  // 第一句较短时会用很小的缓冲启动，后续蓝牙抖动就会表现成“几个字一个大空洞”。
+  // 真正的流尾由 TTS_DONE 处理，届时即使不足 START_THRESHOLD 也会开播冲尾料。
   Tuple *tts_end_t = dict_find(iter, MESSAGE_KEY_TTS_END);
   if (tts_end_t) {
     // 句间会等下一句 TTS API 往返，期间无 chunk 到达。重置看门狗避免误超时。
     if (s_tts_playing || s_tts_loading) {
       tts_reset_watchdog();
     }
-    if (s_tts_count > 0) {
+    if (s_tts_count >= TTS_START_THRESHOLD) {
       tts_start_playback();
     }
   }
