@@ -180,8 +180,8 @@ static int32_t s_active_minutes = 0;
 // 调度和功耗不是问题，优先流畅度。非 Emery 平台无 TTS，不受影响。
 // 内存约束：app 虚拟大小 ≤ 65535（uint16 上限）。basalt 基础 RAM ~18KB，
 // Emery 额外 BSS ≈ ring + 3.3KB，故 ring ≤ 65535 - 18000 - 3300 ≈ 44235。
-// 取 40KB（40960）留 ~3.3KB 安全余量。
-#define TTS_RING_SIZE        40960  // 环形缓冲 40KB（受 app 虚拟大小 65535 上限约束）
+// 取 39KB（39936），留足余量给 s_out_buf(1600) + pending(800) + 其他 BSS。
+#define TTS_RING_SIZE        39936  // 环形缓冲 39KB（受 app 虚拟大小 65535 上限约束）
 #define TTS_DECODE_BYTES     1600   // 每次最多写入 200ms 音频，让 speaker FIFO 吸收 AppTimer 抖动
 #define TTS_MIN_WRITE_BYTES  800    // 非流尾至少写 100ms，避免过碎写入造成断续
 #define TTS_PLAYBACK_MS      100    // speaker pump 间隔；写入量大于间隔播放量，靠 stream 短写自然背压
