@@ -258,8 +258,7 @@
       var hashParam = '';
       var hashMatch = window.location.hash.match(new RegExp('export_data=([^&]*)'));
       if (hashMatch) {
-         // 用 unescape() 解码（配合 JS 端 escape()），正确处理 %uXXXX 中文编码
-         hashParam = unescape(hashMatch[1]);
+         hashParam = decodeURIComponent(hashMatch[1]);
       } else {
          hashParam = getParam('export_data');
       }

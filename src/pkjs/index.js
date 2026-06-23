@@ -1089,6 +1089,15 @@ function callAskAI(question, contextText, MAX_WATCH_CHARS) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // 配置页面
 // ═══════════════════════════════════════════════════════════════════════════════
+// escapeUnicode: 把非 ASCII 字符转为 \uXXXX JS 转义序列，使 JSON 字符串变为纯 ASCII。
+// PebbleKit WebView 可能用非 UTF-8 字符集处理 URL 参数，导致 encodeURIComponent 的
+// UTF-8 百分号序列 decode 后出乱码。纯 ASCII 经 encodeURIComponent 后无此问题。
+function escapeUnicode(str) {
+  return str.replace(/[\u007f-\uffff]/g, function(ch) {
+    return '\\u' + ('0000' + ch.charCodeAt(0).toString(16)).slice(-4);
+  });
+}
+
 Pebble.addEventListener('showConfiguration', function() {
   var hasKey = getSetting('api_key', '') ? '1' : '0';
   var model = getSetting('model', 'google/gemma-4-31b-it');
@@ -1128,10 +1137,10 @@ Pebble.addEventListener('showConfiguration', function() {
     + '?has_key=' + hasKey
     + '&is_emery=' + isEmery
     + '&model=' + encodeURIComponent(model)
-    + '&model_list=' + encodeURIComponent(JSON.stringify(modelList))
-    + '&system_message=' + encodeURIComponent(systemMessage)
+    + '&model_list=' + encodeURIComponent(escapeUnicode(JSON.stringify(modelList)))
+    + '&system_message=' + encodeURIComponent(escapeUnicode(systemMessage))
     + '&active_id=' + encodeURIComponent(store.active_id || '')
-    + '&chats=' + encodeURIComponent(JSON.stringify(chatMeta))
+    + '&chats=' + encodeURIComponent(escapeUnicode(JSON.stringify(chatMeta)))
     + '&api_mode=' + encodeURIComponent(apiMode)
     + '&custom_api_url=' + encodeURIComponent(customApiUrl)
     + '&font_size=' + encodeURIComponent(getSetting('font_size', '0'))
@@ -1141,10 +1150,10 @@ Pebble.addEventListener('showConfiguration', function() {
     + '&web_search_enabled=' + encodeURIComponent(getSetting('web_search_enabled', '1'))
     + '&health_enabled=' + encodeURIComponent(getSetting('health_enabled', '0'))
     + '&has_tts_key=' + (getSetting('tts_api_key', '') ? '1' : '0')
-    + '&tts_rate=' + encodeURIComponent(getSetting('tts_rate', '1.0'))
-    // 用 escape() 而非 encodeURIComponent()：escape() 对中文直接编码为 %uXXXX（Unicode 码点），
-    // 不依赖 UTF-8 byte 序列，PebbleKit WebView 用任何字符集都能正确处理，不会出乱码。
-    + '#export_data=' + escape(JSON.stringify(safeDocs));
+    + '&tts_rate=' + encodeURIComponent(getSetting('tts_rate', '1.0'));
+
+  var safeDocsJson = encodeURIComponent(escapeUnicode(JSON.stringify(safeDocs)));
+  url += '#export_data=' + safeDocsJson;
 
   Pebble.openURL(url);
 });
