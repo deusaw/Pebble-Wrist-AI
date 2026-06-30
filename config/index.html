@@ -205,7 +205,7 @@
         <span class="toggle-slider"></span>
       </label>
     </div>
-    <div class="hint">Create Timeline events and reminders through chat. To remove an event, open its details on the watch and choose Remove.</div>
+    <div class="hint">Create Timeline events and reminders through chat. The watch shows a confirmation notification when a pin is delivered, including far-future events. To remove an event, open its details on the watch and choose Remove.</div>
   </div>
 
   <div class="field">
@@ -297,24 +297,82 @@
       return m ? decodeURIComponent(m[1]) : '';
     }
 
-    // 以明确的 UTF-8 JSON 文件导出。部分手机 WebView/文件查看器会忽略 Blob
-    // 的 charset，并把无 BOM 的 JSON 当成本地 ANSI 编码，因此同时写入 UTF-8 BOM。
+    function encodeUtf8Bytes(text) {
+      var bytes = [];
+      for (var i = 0; i < text.length; i++) {
+        var code = text.charCodeAt(i);
+        if (code >= 0xD800 && code <= 0xDBFF &&
+            i + 1 < text.length) {
+          var low = text.charCodeAt(i + 1);
+          if (low >= 0xDC00 && low <= 0xDFFF) {
+            code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+            i++;
+          }
+        }
+        if (code <= 0x7F) {
+          bytes.push(code);
+        } else if (code <= 0x7FF) {
+          bytes.push(0xC0 | (code >> 6), 0x80 | (code & 0x3F));
+        } else if (code <= 0xFFFF) {
+          bytes.push(0xE0 | (code >> 12),
+            0x80 | ((code >> 6) & 0x3F), 0x80 | (code & 0x3F));
+        } else {
+          bytes.push(0xF0 | (code >> 18),
+            0x80 | ((code >> 12) & 0x3F),
+            0x80 | ((code >> 6) & 0x3F), 0x80 | (code & 0x3F));
+        }
+      }
+      return bytes;
+    }
+
+    function bytesToBase64(bytes) {
+      var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+      var output = '';
+      for (var i = 0; i < bytes.length; i += 3) {
+        var a = bytes[i];
+        var hasB = i + 1 < bytes.length;
+        var hasC = i + 2 < bytes.length;
+        var b = hasB ? bytes[i + 1] : 0;
+        var c = hasC ? bytes[i + 2] : 0;
+        output += chars.charAt(a >> 2);
+        output += chars.charAt(((a & 3) << 4) | (b >> 4));
+        output += hasB ? chars.charAt(((b & 15) << 2) | (c >> 6)) : '=';
+        output += hasC ? chars.charAt(c & 63) : '=';
+      }
+      return output;
+    }
+
+    // 不再把 JS 字符串直接交给 iOS WebView 的 Blob 编码器。
+    // 先确定性编码为 UTF-8 字节并写 BOM，再用 TypedArray 创建文件。
     function downloadUtf8Json(json, filename) {
-      var utf8Bom = '\ufeff';
-      var blob = new Blob([utf8Bom, json], {
-        type: 'application/json;charset=utf-8'
-      });
-      var objectUrl = URL.createObjectURL(blob);
+      var bytes = [0xEF, 0xBB, 0xBF].concat(encodeUtf8Bytes(json));
       var a = document.createElement('a');
-      a.href = objectUrl;
       a.download = filename;
+      var objectUrl = '';
+      var urlApi = window.URL || window.webkitURL;
+      try {
+        if (!urlApi || typeof urlApi.createObjectURL !== 'function') {
+          throw new Error('Object URL unavailable');
+        }
+        var blob = new Blob([new Uint8Array(bytes)], {
+          type: 'application/json;charset=utf-8'
+        });
+        objectUrl = urlApi.createObjectURL(blob);
+        a.href = objectUrl;
+      } catch (blobError) {
+        // 旧 WebView 的最终兜底：Base64 data URL 同样携带已确定的 UTF-8 字节。
+        a.href = 'data:application/json;charset=utf-8;base64,' +
+          bytesToBase64(bytes);
+      }
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      // WebView 需要等 click 的下载任务取得 URL 后再释放，立即 revoke 可能生成空文件。
-      window.setTimeout(function() {
-        URL.revokeObjectURL(objectUrl);
-      }, 1000);
+      if (objectUrl) {
+        // WebView 需要等下载任务取得 URL 后再释放。
+        window.setTimeout(function() {
+          urlApi.revokeObjectURL(objectUrl);
+        }, 3000);
+      }
     }
 
     // 读取初始化参数（由 PebbleKit JS 的 openURL 通过 query 参数传递）
