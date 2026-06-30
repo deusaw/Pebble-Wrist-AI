@@ -100,10 +100,20 @@
     .toggle-switch input:checked + .toggle-slider::before { transform: translateX(20px); }
     .beta-badge { display: inline-block; font-size: 10px; color: #fff; background: #666; padding: 1px 6px; border-radius: 4px; margin-left: 6px; vertical-align: middle; }
     .beta-hint { font-size: 11px; color: #a60; margin-top: 4px; }
+    .release-notice {
+      margin: 0 0 16px; padding: 11px 12px; border: 1px solid #9a5b00;
+      border-radius: 7px; background: #2b1b08; color: #ffc66d;
+      font-size: 12px; line-height: 1.45;
+    }
   </style>
 </head>
 <body>
   <h1>Wrist AI</h1>
+  <div class="release-notice">
+    v1.4.0 preview: Start Listening on Launch, multi-day Health and Sleep,
+    Pebble 2 Duo TTS, and Timeline require the v1.4.0 watch app update.
+    These options do not take effect on older Wrist AI versions.
+  </div>
 
 <!-- API 设置 -->
    <div class="field">
@@ -127,7 +137,7 @@
    <div class="field" id="voice_wrap">
      <label>Google Cloud TTS API Key <span class="beta-badge">Beta</span></label>
      <input type="password" id="tts_api_key" placeholder="AIza...">
-     <div class="hint">Required for text-to-speech. Get a key from Google Cloud Console. Only works on Pebble Time 2 (Emery).</div>
+     <div class="hint">Required for text-to-speech. Get a key from Google Cloud Console. Supported on Pebble Time 2; Pebble 2 Duo support is experimental and disabled by default.</div>
      <label style="margin-top:8px;display:block">Speech Rate</label>
      <select id="tts_rate" style="width:100%;padding:6px;background:#1a1a2e;color:#fff;border:1px solid #444;border-radius:4px">
        <option value="0.75">0.75× (Slower)</option>
@@ -135,6 +145,16 @@
        <option value="1.25">1.25× (Faster)</option>
        <option value="1.5">1.5× (Fast)</option>
      </select>
+     <div id="duo_tts_wrap" style="display:none;margin-top:10px">
+       <div class="toggle-row">
+         <span class="toggle-label">Enable Duo TTS <span class="beta-badge">Experimental</span></span>
+         <label class="toggle-switch">
+           <input type="checkbox" id="duo_tts_enabled">
+           <span class="toggle-slider"></span>
+         </label>
+       </div>
+       <div class="beta-hint">⚠️ Disabled by default because Duo playback has not been validated on real hardware.</div>
+     </div>
      <div class="beta-hint">⚠️ This feature is part of v1.3.0 (beta).</div>
      <button class="btn btn-danger" id="delete_tts_key" style="margin-top:6px">Delete TTS Key</button>
    </div>
@@ -164,6 +184,28 @@
       <div class="radio-btn" data-size="2" id="font_size_l">L</div>
     </div>
     <div class="hint">Reply text size on watch</div>
+  </div>
+
+  <div class="field">
+    <div class="toggle-row">
+      <span class="toggle-label">Start Listening on Launch</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="auto_dictation">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div class="hint">Start voice dictation once when Wrist AI is opened. Recognition is sent directly to the selected LLM.</div>
+  </div>
+
+  <div class="field">
+    <div class="toggle-row">
+      <span class="toggle-label">Manage Timeline Events <span class="beta-badge">Beta</span></span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="timeline_enabled">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div class="hint">Allow explicit chat requests to create or delete Wrist AI Timeline events. Ambiguous requests must be clarified first.</div>
   </div>
 
   <div class="field">
@@ -219,8 +261,21 @@
         <span class="toggle-slider"></span>
       </label>
     </div>
-    <div class="hint">Include daily step count and active minutes in AI context. Sent to your AI provider with each question when enabled (including custom endpoints).</div>
-    <div class="beta-hint">⚠️ This feature is part of v1.3.0 (beta).</div>
+    <div class="hint">Include multi-day activity and optional sleep history in AI context. Sent to your AI provider with each question when enabled.</div>
+    <label>History Range</label>
+    <select id="health_days" style="width:100%;padding:6px;background:#1a1a2e;color:#fff;border:1px solid #444;border-radius:4px">
+      <option value="1">Today</option>
+      <option value="3">Last 3 days</option>
+      <option value="7">Last 7 days</option>
+    </select>
+    <div class="toggle-row" style="margin-top:8px">
+      <span class="toggle-label">Include Sleep and Deep Sleep</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="health_sleep">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div class="beta-hint">⚠️ Requires Pebble Health to be enabled on the watch.</div>
   </div>
 
   <button class="btn btn-primary" id="save">Save Settings</button>
@@ -240,6 +295,26 @@
     function getParam(name) {
       var m = window.location.search.match(new RegExp('[?&]' + name + '=([^&]*)'));
       return m ? decodeURIComponent(m[1]) : '';
+    }
+
+    // 以明确的 UTF-8 JSON 文件导出。部分手机 WebView/文件查看器会忽略 Blob
+    // 的 charset，并把无 BOM 的 JSON 当成本地 ANSI 编码，因此同时写入 UTF-8 BOM。
+    function downloadUtf8Json(json, filename) {
+      var utf8Bom = '\ufeff';
+      var blob = new Blob([utf8Bom, json], {
+        type: 'application/json;charset=utf-8'
+      });
+      var objectUrl = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      // WebView 需要等 click 的下载任务取得 URL 后再释放，立即 revoke 可能生成空文件。
+      window.setTimeout(function() {
+        URL.revokeObjectURL(objectUrl);
+      }, 1000);
     }
 
     // 读取初始化参数（由 PebbleKit JS 的 openURL 通过 query 参数传递）
@@ -286,6 +361,10 @@
     var locationEnabled = getParam('location_enabled') === '1';
     var webSearchEnabled = (getParam('web_search_enabled') || '1') === '1';
     var healthEnabled = getParam('health_enabled') === '1';
+    var autoDictation = getParam('auto_dictation') === '1';
+    var healthDays = getParam('health_days') || '7';
+    var healthSleep = getParam('health_sleep') !== '0';
+    var timelineEnabled = getParam('timeline_enabled') === '1';
 
     function applyApiMode(mode) {
       apiMode = mode;
@@ -343,15 +422,22 @@
     document.getElementById('location_enabled').checked = locationEnabled;
     document.getElementById('web_search_enabled').checked = webSearchEnabled;
     document.getElementById('health_enabled').checked = healthEnabled;
+    document.getElementById('auto_dictation').checked = autoDictation;
+    document.getElementById('health_days').value = healthDays;
+    document.getElementById('health_sleep').checked = healthSleep;
+    document.getElementById('timeline_enabled').checked = timelineEnabled;
 
     // TTS key 状态
     var hasTtsKey = getParam('has_tts_key') === '1';
     var isEmery = getParam('is_emery') === '1';
-    // 非 Emery 平台无扬声器，隐藏整个 TTS 配置区域
+    var isFlint = getParam('is_flint') === '1';
+    // 参数在兼容旧 URL 的前提下同时代表 Emery / Flint 扬声器平台。
     if (!isEmery) {
       var voiceWrap = document.getElementById('voice_wrap');
       if (voiceWrap) voiceWrap.style.display = 'none';
     }
+    if (isFlint) document.getElementById('duo_tts_wrap').style.display = 'block';
+    document.getElementById('duo_tts_enabled').checked = getParam('duo_tts_enabled') === '1';
     var ttsKeyEl = document.getElementById('tts_api_key');
     if (hasTtsKey) {
       ttsKeyEl.placeholder = 'Key is set. Leave blank to keep.';
@@ -482,7 +568,12 @@
         location_enabled: document.getElementById('location_enabled').checked ? 1 : 0,
         web_search_enabled: document.getElementById('web_search_enabled').checked ? 1 : 0,
         health_enabled: document.getElementById('health_enabled').checked ? 1 : 0,
-        tts_rate: document.getElementById('tts_rate').value
+        auto_dictation: document.getElementById('auto_dictation').checked ? 1 : 0,
+        health_days: parseInt(document.getElementById('health_days').value, 10),
+        health_sleep: document.getElementById('health_sleep').checked ? 1 : 0,
+        tts_rate: document.getElementById('tts_rate').value,
+        duo_tts_enabled: document.getElementById('duo_tts_enabled').checked ? 1 : 0,
+        timeline_enabled: document.getElementById('timeline_enabled').checked ? 1 : 0
       };
       var key = document.getElementById('api_key').value.trim();
       if (key.length > 0) s.api_key = key;
@@ -558,14 +649,9 @@
           messages: msgs
         };
         var json = JSON.stringify(exportObj, null, 2);
-        var blob = new Blob([json], { type: 'application/json' });
-        var a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
         var safeName = (chat.title || 'chat').replace(/[^\w\u4e00-\u9fa5-]/g, '_').substring(0, 30);
-        a.download = 'pwai_' + safeName + '_' + new Date().toISOString().slice(0, 10) + '.json';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
+        var filename = 'pwai_' + safeName + '_' + new Date().toISOString().slice(0, 10) + '.json';
+        downloadUtf8Json(json, filename);
       }
     });
 
