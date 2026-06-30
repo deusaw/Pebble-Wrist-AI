@@ -155,7 +155,7 @@
        </div>
        <div class="beta-hint">⚠️ Disabled by default because Duo playback has not been validated on real hardware.</div>
      </div>
-     <div class="beta-hint">⚠️ This feature is part of v1.3.0 (beta).</div>
+     <div class="beta-hint">⚠️ Emery TTS was introduced in v1.3.0; experimental Duo support requires v1.4.0.</div>
      <button class="btn btn-danger" id="delete_tts_key" style="margin-top:6px">Delete TTS Key</button>
    </div>
 
@@ -405,7 +405,9 @@
         fontSizeBtns[fi].className = 'radio-btn';
       }
     }
-    document.querySelectorAll('.radio-group').forEach(function(group) {
+    var radioGroups = document.querySelectorAll('.radio-group');
+    for (var gi = 0; gi < radioGroups.length; gi++) {
+      var group = radioGroups[gi];
       group.addEventListener('click', function(e) {
         var btn = e.target;
         if (!btn.classList.contains('radio-btn')) return;
@@ -416,7 +418,7 @@
         btn.className = 'radio-btn active';
         fontSize = btn.getAttribute('data-size');
       });
-    });
+    }
     document.getElementById('font_bold').checked = fontBold;
     document.getElementById('enable_surprise').checked = !disableSurprise;
     document.getElementById('location_enabled').checked = locationEnabled;
@@ -543,7 +545,7 @@
           + '<div class="chat-title">' + (c.title || 'Untitled').replace(/</g, '&lt;') + '</div>'
           + '<div class="chat-meta">' + dateStr + ' · ' + msgCount + ' msgs' + (isActive ? ' · Active' : '') + (!hasDetails ? ' · No export data' : '') + '</div>'
           + '</div>'
-+ '<div class="chat-actions">'
+          + '<div class="chat-actions">'
            + (isActive ? '' : '<button class="chat-btn chat-btn-switch" data-id="' + c.id + '">Switch</button>')
            + '<button class="chat-btn chat-btn-export" data-id="' + c.id + '">Export</button>'
            + '<button class="chat-btn chat-btn-delete" data-id="' + c.id + '">Del</button>'
