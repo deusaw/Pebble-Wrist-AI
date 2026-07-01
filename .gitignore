@@ -1,3 +1,5 @@
 build/
+.lock-waf_*_build
 .pebble-*
 .DS_Store
+node_modules/

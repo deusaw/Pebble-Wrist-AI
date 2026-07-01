@@ -227,7 +227,7 @@
     </div>
   </header>
   <div class="release-notice">
-    v1.4.2 adds exact Sleep intervals, Notes and TODOs, strong local reminders,
+    v1.4.2 adds exact Sleep intervals, ToDo & Notes, strong local reminders,
     launch-aware Timeline, long-term Memory, and Simplified Chinese normalization.
     Install the v1.4.2 watch app before relying on these features.
   </div>
@@ -352,7 +352,7 @@
           <span class="toggle-label">Create Timeline Events <span class="beta-badge">Beta</span></span>
           <label class="toggle-switch"><input type="checkbox" id="timeline_enabled"><span class="toggle-slider"></span></label>
         </div>
-        <div class="hint">Creates timed and all-day events from natural requests. Actionable events can also create linked TODOs. Timeline removal remains manual on the watch.</div>
+        <div class="hint">Creates timed and all-day events from natural requests. Wrist AI can update and remove its own Timeline pins.</div>
       </div>
       <div class="field subgroup">
         <div class="toggle-row">
@@ -372,6 +372,42 @@
         </div>
         <div class="beta-hint">Requires Pebble Health to be enabled on the watch.</div>
       </div>
+    </div>
+  </details>
+
+  <details class="section-card">
+    <summary><h2>Todoist sync</h2><span class="section-kicker">Two-way ToDo & Notes and Timeline synchronization</span></summary>
+    <div class="section-body">
+      <div class="toggle-row">
+        <span class="toggle-label">Enable Todoist Sync <span class="beta-badge">Beta</span></span>
+        <label class="toggle-switch"><input type="checkbox" id="todoist_enabled"><span class="toggle-slider"></span></label>
+      </div>
+      <div class="field">
+        <label>Todoist API Token</label>
+        <input type="password" id="todoist_token" autocomplete="off" placeholder="Paste a Todoist API token">
+        <div class="status" id="todoist_token_status"></div>
+        <label style="margin-top:8px;font-weight:500">
+          <input type="checkbox" id="delete_todoist_token" style="width:auto;margin-right:6px">Remove saved token
+        </label>
+      </div>
+      <div class="field">
+        <label>Todoist Project ID</label>
+        <input type="text" id="todoist_project_id" list="todoist_projects" placeholder="Recommended: a dedicated Wrist AI project ID">
+        <datalist id="todoist_projects"></datalist>
+        <div class="hint">Tasks created by Wrist AI go to this project. Only unlinked tasks from this project are imported. Leave blank to use Inbox without importing unrelated Inbox tasks.</div>
+      </div>
+      <div class="field">
+        <label>Automatic Sync</label>
+        <select id="todoist_sync_interval">
+          <option value="0">When Wrist AI opens</option>
+          <option value="30">Every 30 minutes</option>
+          <option value="60">Every hour</option>
+          <option value="180">Every 3 hours</option>
+        </select>
+        <div class="hint">Scheduled sync briefly launches Wrist AI using one reserved Wakeup slot. Open-time sync always remains enabled.</div>
+      </div>
+      <button type="button" class="btn btn-primary" id="todoist_test">Test Todoist Connection</button>
+      <div class="status" id="todoist_test_status"></div>
     </div>
   </details>
 
@@ -406,7 +442,7 @@
   </details>
 
   <details class="section-card">
-    <summary><h2>Notes and TODOs</h2><span class="section-kicker">Edit, complete or delete local items</span></summary>
+    <summary><h2>ToDo & Notes</h2><span class="section-kicker">Edit, complete or delete local items</span></summary>
     <div class="section-body"><div id="note_config_list"></div></div>
   </details>
 
@@ -564,6 +600,10 @@
     var healthDays = getParam('health_days') || '7';
     var healthSleep = getParam('health_sleep') !== '0';
     var timelineEnabled = getParam('timeline_enabled') === '1';
+    var todoistEnabled = getParam('todoist_enabled') === '1';
+    var hasTodoistToken = getParam('has_todoist_token') === '1';
+    var todoistProjectId = getParam('todoist_project_id') || '';
+    var todoistSyncInterval = getParam('todoist_sync_interval') || '0';
     var themeColor = parseInt(getParam('theme_color') || '-1', 10);
     if (isNaN(themeColor) || themeColor < -1 || themeColor > 6) themeColor = -1;
 
@@ -639,6 +679,62 @@
     document.getElementById('health_days').value = healthDays;
     document.getElementById('health_sleep').checked = healthSleep;
     document.getElementById('timeline_enabled').checked = timelineEnabled;
+    document.getElementById('todoist_enabled').checked = todoistEnabled;
+    document.getElementById('todoist_enabled').addEventListener('change',
+      function() {
+        if (this.checked)
+          document.getElementById('timeline_enabled').checked = true;
+      });
+    document.getElementById('todoist_project_id').value = todoistProjectId;
+    document.getElementById('todoist_sync_interval').value =
+      todoistSyncInterval;
+    document.getElementById('todoist_token_status').textContent =
+      hasTodoistToken ? 'Token is set. Leave blank to keep it.' :
+        'No Todoist token configured.';
+    document.getElementById('todoist_token').placeholder =
+      hasTodoistToken ? 'Leave blank to keep current token' :
+        'Paste a Todoist API token';
+
+    document.getElementById('todoist_test').addEventListener('click',
+      function() {
+        var token = document.getElementById('todoist_token').value.trim();
+        var status = document.getElementById('todoist_test_status');
+        if (!token) {
+          status.textContent = hasTodoistToken ?
+            'Save first to test the stored token from Wrist AI.' :
+            'Enter a token first.';
+          return;
+        }
+        status.textContent = 'Testing...';
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', 'https://api.todoist.com/api/v1/projects?limit=200', true);
+        xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+        xhr.onload = function() {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            status.textContent = 'Connected to Todoist.';
+            try {
+              var result = JSON.parse(xhr.responseText);
+              var projects = Array.isArray(result) ? result :
+                (result.results || []);
+              var options = '';
+              for (var pi = 0; pi < projects.length; pi++) {
+                options += '<option value="' +
+                  escapeHtml(String(projects[pi].id)) + '">' +
+                  escapeHtml(projects[pi].name || 'Project') + '</option>';
+              }
+              document.getElementById('todoist_projects').innerHTML = options;
+            } catch (projectError) {}
+          } else {
+            status.textContent = xhr.status === 401 ?
+              'Invalid Todoist token.' :
+              'Todoist returned HTTP ' + xhr.status + '.';
+          }
+        };
+        xhr.onerror = function() {
+          status.textContent = 'Network or WebView request failed.';
+        };
+        xhr.send();
+      });
 
     function renderThemeChoices() {
       var choices = document.querySelectorAll('.theme-choice');
@@ -749,12 +845,12 @@
       }
     });
 
-    // ── Notes / TODO 管理 ────────────────────────────────────────────
+    // ── ToDo & Notes 管理 ────────────────────────────────────────────
     var noteConfigList = document.getElementById('note_config_list');
 
     function renderConfigNotes() {
       if (configNotes.length === 0) {
-        noteConfigList.innerHTML = '<div class="empty">No Notes or TODOs yet</div>';
+        noteConfigList.innerHTML = '<div class="empty">No ToDo & Notes yet</div>';
         return;
       }
       configNotes.sort(function(a, b) {
@@ -768,9 +864,12 @@
         html += '<div class="note-config-item' + (done ? ' done' : '') +
           '" data-note-id="' + escapeHtml(note.id) + '">' +
           '<div class="note-config-meta">' +
-          (note.type === 'todo' ? 'TODO' : 'NOTE') +
+          (note.type === 'todo' ? 'TODO' :
+            (note.type === 'event' ? 'EVENT' : 'NOTE')) +
           (note.due ? ' · ' + escapeHtml(String(note.due).substring(0, 16).replace('T', ' ')) : '') +
-          (done ? ' · COMPLETED' : ' · OPEN') + '</div>' +
+          (done ? ' · COMPLETED' : ' · OPEN') +
+          (note.timeline_pin_id ? ' · TIMELINE' : '') +
+          (note.todoist_task_id ? ' · TODOIST' : '') + '</div>' +
           '<input class="note-title-input" data-field="title" maxlength="80" value="' +
           escapeHtml(note.title || '') + '">' +
           '<textarea class="note-content-input" data-field="content" maxlength="1000" placeholder="Details">' +
@@ -881,7 +980,11 @@
         health_sleep: document.getElementById('health_sleep').checked ? 1 : 0,
         tts_rate: document.getElementById('tts_rate').value,
         duo_tts_enabled: document.getElementById('duo_tts_enabled').checked ? 1 : 0,
-        timeline_enabled: document.getElementById('timeline_enabled').checked ? 1 : 0,
+        timeline_enabled: (document.getElementById('timeline_enabled').checked ||
+          document.getElementById('todoist_enabled').checked) ? 1 : 0,
+        todoist_enabled: document.getElementById('todoist_enabled').checked ? 1 : 0,
+        todoist_project_id: document.getElementById('todoist_project_id').value.trim(),
+        todoist_sync_interval: parseInt(document.getElementById('todoist_sync_interval').value, 10),
         theme_color: themeColor
       };
       var noteUpdates = [];
@@ -902,6 +1005,10 @@
       if (key.length > 0) s.api_key = key;
       var ttsKey = document.getElementById('tts_api_key').value.trim();
       if (ttsKey.length > 0) s.tts_api_key = ttsKey;
+      var todoistToken = document.getElementById('todoist_token').value.trim();
+      if (todoistToken.length > 0) s.todoist_token = todoistToken;
+      if (document.getElementById('delete_todoist_token').checked)
+        s.delete_todoist_token = 1;
       // 附带页内累积的切换/删除操作
       if (activeId !== getParam('active_id')) s.switch_to = activeId;
       if (pendingDeletes.length > 0) s.deleted_chats = pendingDeletes;

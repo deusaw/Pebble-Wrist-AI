@@ -25,6 +25,7 @@ typedef enum {
   STATE_IDLE_NO_KEY,   // 未配置 API Key，圆圈灰色，提示用户去设置
   STATE_IDLE_READY,    // 已就绪，显示 Wi logo + 当前对话标题
   STATE_RECORDING,     // 语音输入中（3点跳动动画）
+  STATE_REVIEW,        // 显示识别结果：SELECT 发送，DOWN 重录，BACK 取消
   STATE_SENDING,       // 正在发送问题到手机（箭头动画）
   STATE_THINKING,      // 等待 AI 回复（呼吸圆 + 旋转小点）
   STATE_SHRINKING,     // 大圆缩小动画（过渡到回复显示）
@@ -43,6 +44,10 @@ static AppState s_state = STATE_IDLE_NO_KEY;
 #define C_BG          GColorWhite
 #define C_DOT_ON      GColorBlue
 #define C_DOT_OFF     GColorLightGray
+// Color watches reuse the random Home theme. Monochrome watches use black so
+// the forced white selection text always keeps maximum contrast.
+#define C_MENU_HIGHLIGHT PBL_IF_COLOR_ELSE(s_bg_color, GColorBlack)
+#define THEME_HEADER_HEIGHT 26
 
 // ── 背景 ─────────────────────────────────────────────────────────────────────
 // 每次启动随机纯色底 + 5 层色彩条纹（回复页/菜单页顶部装饰用）
@@ -50,8 +55,23 @@ static AppState s_state = STATE_IDLE_NO_KEY;
 static GColor s_wave_colors[WAVE_LAYERS];
 static GColor s_bg_color;
 
-// 调色板：暖色滩涂系（Pebble 64 色中挑选的柔和色）
-static const GColor s_palette[] = {
+// 主状态页背景：只使用能与白色 Wi Logo 保持清晰对比的饱和颜色。
+// 保留原本最搭配 Logo 的橙色和紫色；蓝色/红色选用更深的色阶。
+// 注意：回答页和菜单页不使用这组背景色，保持原有白底设计。
+static const GColor s_fill_palette[] = {
+  { .argb = GColorSunsetOrangeARGB8 },
+  { .argb = GColorVividVioletARGB8 },
+  { .argb = GColorLavenderIndigoARGB8 },
+  { .argb = GColorCobaltBlueARGB8 },
+  { .argb = GColorOxfordBlueARGB8 },
+  { .argb = GColorDarkCandyAppleRedARGB8 },
+  { .argb = GColorDarkGrayARGB8 },
+};
+#define FILL_PALETTE_SIZE 7
+static int s_theme_color = -1;  // -1=random, otherwise s_fill_palette index
+
+// 回答页顶部彩条继续使用原来的完整柔和彩色调色板。
+static const GColor s_stripe_palette[] = {
   { .argb = GColorSunsetOrangeARGB8 },
   { .argb = GColorMelonARGB8 },
   { .argb = GColorRajahARGB8 },
@@ -65,16 +85,15 @@ static const GColor s_palette[] = {
   { .argb = GColorInchwormARGB8 },
   { .argb = GColorSpringBudARGB8 },
 };
-#define PALETTE_SIZE 12
+#define STRIPE_PALETTE_SIZE 12
 
 // ── 布局常量 ─────────────────────────────────────────────────────────────────
 #define CIRCLE_R_SMALL  14
 #define CIRCLE_Y_SMALL  PBL_IF_ROUND_ELSE(28, 20)
 
-// Emery 平台有扬声器，回复页面标题下方加一行 "Long Press Down to TTS" 操作提示，
-// 需要把滚动内容区下移让出空间。非 Emery 平台无 TTS，偏移为 0。
-#if defined(PBL_PLATFORM_EMERY)
-  #define TTS_HINT_OFFSET   14   // Emery: 标题下 TTS 提示占用的高度
+// Emery / Flint 扬声器平台在回复标题下显示 TTS 操作提示。
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
+  #define TTS_HINT_OFFSET   20   // 提示下方额外留 6px，避免与正文粘连
 #else
   #define TTS_HINT_OFFSET   0
 #endif
@@ -121,6 +140,21 @@ static TextLayer   *s_question_display_layer;  // 回复区顶部的问题
 
 // ── Dictation ────────────────────────────────────────────────────────────────
 static DictationSession *s_dictation_session;
+static AppTimer *s_auto_dictation_timer = NULL;
+static bool s_auto_dictation_attempted = false;
+static bool s_auto_dictation_synced = false;
+static AppTimer *s_dictation_retry_timer = NULL;
+static bool s_dictation_interrupt_retry_used = false;
+static char *s_pending_question = NULL;
+static AppLaunchReason s_launch_reason = APP_LAUNCH_USER;
+static uint32_t s_launch_args = 0;
+static bool s_force_launch_dictation = false;
+// True only when Wrist AI was entered via Quick Launch or a Timeline action —
+// i.e. a deliberate one-shot entry, not a plain open from the app menu. The
+// Auto Dictation setting is honoured only for such entries, so opening the app
+// normally from the launcher does not auto-start recording.
+static bool s_quick_launch_entry = false;
+static char s_launch_context[48];
 
 // ── 对话列表（从手机接收）──────────────────────────────────────────────────────
 #define MAX_WATCH_CHATS 20   // RAM: 20 × 48 bytes = 960 bytes（Basalt 24KB 内安全）
@@ -153,8 +187,52 @@ static MenuLayer *s_menu_layer;
 static Window    *s_model_window;
 static MenuLayer *s_model_menu_layer;
 
-// TTS 音量选择窗口（仅 Emery）
-#if defined(PBL_PLATFORM_EMERY)
+#define MAX_WATCH_NOTES 20
+#define NOTE_ID_LEN 24
+#define NOTE_TITLE_LEN 36
+#define NOTE_DUE_LEN 17
+typedef struct {
+  char id[NOTE_ID_LEN];
+  char title[NOTE_TITLE_LEN];
+  char due[NOTE_DUE_LEN];
+  bool done;
+  bool todo;
+  bool event;
+} WatchNoteEntry;
+static WatchNoteEntry *s_note_entries;
+static int s_note_count;
+static int s_selected_note_index = -1;
+static bool s_notes_list_dirty;
+static bool s_note_actions_visible;
+static Window *s_notes_window;
+static MenuLayer *s_notes_menu_layer;
+static Layer *s_notes_bar_layer;
+static Window *s_note_actions_window;
+static MenuLayer *s_note_actions_menu_layer;
+static Layer *s_note_actions_bar_layer;
+
+#define MAX_NOTE_WAKEUPS 7
+#define PERSIST_NOTE_WAKEUP_BASE 100
+#define PERSIST_SYNC_WAKEUP_ID 108
+#define SYNC_WAKEUP_COOKIE 0x5753594E
+typedef struct {
+  int32_t code;
+  WakeupId wakeup_id;
+  char note_id[NOTE_ID_LEN];
+  char title[NOTE_TITLE_LEN];
+} NoteWakeupSlot;
+static NoteWakeupSlot *s_note_wakeups;
+static char s_wakeup_note_title[NOTE_TITLE_LEN];
+static bool s_wakeup_note_active;
+static WakeupId s_sync_wakeup_id = -1;
+static bool s_sync_wakeup_launch;
+static char s_sync_status[24];
+static bool s_startup_message_guard = true;
+static AppTimer *s_sync_wakeup_timer;
+static long s_pending_sync_wakeup_timestamp;
+
+// TTS 音量选择窗口（Emery / Flint）
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
 static Window    *s_volume_window;
 static MenuLayer *s_volume_menu_layer;
 #endif
@@ -167,6 +245,12 @@ static MenuLayer *s_volume_menu_layer;
 #define PERSIST_KEY_TTS_VOLUME       5  // TTS 音量: 10-100
 #define PERSIST_KEY_HEALTH_ENABLED   6  // 健康数据开关: 0=关闭, 1=开启
 #define PERSIST_KEY_WEB_SEARCH       8  // 联网搜索: 0=关闭, 1=开启
+#define PERSIST_KEY_AUTO_DICTATION  10  // 启动时自动录音: 0=关闭, 1=开启
+#define PERSIST_KEY_HEALTH_DAYS     11  // 健康历史范围: 1/3/7 天
+#define PERSIST_KEY_HEALTH_SLEEP    12  // 睡眠数据: 0=关闭, 1=开启
+#define PERSIST_KEY_DUO_TTS         13  // Flint TTS 实验开关，默认关闭
+#define PERSIST_KEY_THEME_COLOR     14  // -1=random, 0..6=fixed Home/menu theme
+#define PERSIST_KEY_NOTE_COMMAND    15  // 待同步的幂等 Note 操作
 // 注意：key 7 (曾为 AUTO_TTS) 和 key 9 (曾为 HAS_TTS_KEY) 已废弃，不复用以免旧值干扰。
 
 // ── 字体设置 ──────────────────────────────────────────────────────────────────
@@ -175,25 +259,76 @@ static int s_font_bold = 0;       // 0=不加粗, 1=加粗
 static int s_disable_surprise = 0; // 0=启用彩蛋, 1=禁用彩蛋
 static int s_health_enabled = 0;  // 0=不发健康数据, 1=发健康数据
 static int s_web_search = 1;      // 0=不联网搜索, 1=联网搜索（默认开，仅 OpenRouter 生效，由 JS 端判断）
+static int s_auto_dictation = 0;  // 0=关闭, 1=每次 app launch 自动启动一次录音
+static int s_health_days = 7;
+static int s_health_sleep = 1;
+static int s_duo_tts_enabled = 0;
+static AppTimer *s_note_command_timer;
+static char s_pending_note_command[NOTE_ID_LEN + 16];
 
 // ── 健康数据（随 QUESTION 一起发送）───────────────────────────────
 static int32_t s_step_count = 0;
 static int32_t s_active_minutes = 0;
+#define HEALTH_DATA_SIZE 512
+#define HEALTH_INTERVAL_SIZE 384
+static char *s_health_data;
 
-// ── TTS 语音播放（仅 Emery 平台有扬声器）──────────────────────────
-#if defined(PBL_PLATFORM_EMERY)
-// Emery 专属 TTS 参数 — 充分利用 Pebble Time 2 的更强 CPU。
-// 调度和功耗不是问题，优先流畅度。非 Emery 平台无 TTS，不受影响。
-// 内存约束：app 虚拟大小 ≤ 65535（uint16 上限）。basalt 基础 RAM ~18KB，
-// Emery 额外 BSS ≈ ring + 3.3KB，故 ring ≤ 65535 - 18000 - 3300 ≈ 44235。
-// 新增音量菜单/滚动保护后虚拟大小再次逼近 65535；取 36KB 给代码留编译余量。
-// HIGH=32000 时距满约 4.75KB，仍覆盖 PAUSE 往返期间的在途 chunk。
-#define TTS_RING_SIZE        36864  // 环形缓冲 36KB（受 app 虚拟大小 65535 上限约束）
+#if defined(PBL_HEALTH)
+typedef struct {
+  char *buffer;
+  size_t buffer_size;
+  int count;
+} SleepIntervalContext;
+
+static bool sleep_interval_callback(HealthActivity activity, time_t time_start,
+                                    time_t time_end, void *context) {
+  SleepIntervalContext *ctx = context;
+  if (!ctx || ctx->count >= 24 || time_end <= time_start) return false;
+
+  struct tm start_tm = *localtime(&time_start);
+  struct tm end_tm = *localtime(&time_end);
+  char start_text[17], end_text[17];
+  strftime(start_text, sizeof(start_text), "%Y-%m-%dT%H:%M", &start_tm);
+  strftime(end_text, sizeof(end_text), "%Y-%m-%dT%H:%M", &end_tm);
+
+  size_t used = strlen(ctx->buffer);
+  if (used >= ctx->buffer_size - 1) return false;
+  int written = snprintf(ctx->buffer + used, ctx->buffer_size - used,
+                         "%c|%s|%s|%ld\n",
+                         activity == HealthActivityRestfulSleep ? 'D' : 'S',
+                         start_text, end_text,
+                         (long)((time_end - time_start + 30) / 60));
+  if (written < 0 || (size_t)written >= ctx->buffer_size - used) {
+    ctx->buffer[used] = '\0';
+    return false;
+  }
+  ctx->count++;
+  return true;
+}
+#endif
+
+// ── TTS 语音播放（Emery / Flint 扬声器平台）────────────────────────
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
 #define TTS_DECODE_BYTES     1600   // 每次最多写入 200ms 音频，让 speaker FIFO 吸收 AppTimer 抖动
 #define TTS_MIN_WRITE_BYTES  800    // 非流尾至少写 100ms，避免过碎写入造成断续
 #define TTS_PLAYBACK_MS      100    // speaker pump 间隔；JS 发送速率需高于 pump 速率，避免抽干 ring
-#define TTS_START_THRESHOLD  24000  // 首次开播预缓冲 3.0s，用启动等待换稳定播放
-#define TTS_RESTART_THRESHOLD 8000  // 中途断粮后只攒 1.0s 再恢复，避免 3-4s 重启空洞
+#if defined(PBL_PLATFORM_FLINT)
+  // Pebble 2 Duo / Flint 的 app runtime RAM 上限约 30KB，不能使用 Emery 36KB ring。
+  #define TTS_RING_SIZE         12288
+  #define TTS_START_THRESHOLD    7500
+  #define TTS_RESTART_THRESHOLD  6000
+  // 留出至少 3.7KB 给已进入 AppMessage 管道的音频，避免 PAUSE 往返期间溢出。
+  #define TTS_PAUSE_HIGH         8500
+  #define TTS_RESUME_LOW         6500
+#else
+  // v1.4.2 transcript review adds code to the same 16-bit virtual-size image.
+  // Use a 35KB ring and pause earlier, retaining >5KB for in-flight chunks.
+  #define TTS_RING_SIZE         35840
+  #define TTS_START_THRESHOLD   24000
+  #define TTS_RESTART_THRESHOLD  8000
+  #define TTS_PAUSE_HIGH        30500
+  #define TTS_RESUME_LOW        24500
+#endif
 #define TTS_CLOSE_DELAY_MS   1500   // 句间延迟关闭扬声器
 #define TTS_WATCHDOG_MS      60000  // TTS 看门狗：全量预编码可能等待较久，60s 无 chunk/done 才清理
 #define TTS_FLOW_RETRY_MS    120    // PAUSE/RESUME outbox 忙/失败时快速重试，避免 JS 卡在暂停态
@@ -201,17 +336,20 @@ static int32_t s_active_minutes = 0;
 // raw PCM 8000 B/s 消费；JS 正常约 8.14KB/s 恒速投递，PAUSE 后约 7KB/s 轻降速。
 // 正常播放不再依赖 PAUSE/RESUME 周期，反馈流控只作为接近满缓冲时的保险。
 // LOW=26000（3.25s 跑道），HIGH=32000（距 ring 满约 4.75KB），防蓝牙抖动时见底或溢出。
-#define TTS_PAUSE_HIGH       32000  // 缓冲≥此值 → 发 TTS_PAUSE（应急轻降速）
-#define TTS_RESUME_LOW       26000  // 缓冲≤此值 → 发 TTS_RESUME（低水位/补货信号）
 #define TTS_VOLUME_MIN       10
 #define TTS_VOLUME_MAX       100
 #define TTS_VOLUME_STEP      10
+#define TTS_SPEAKER_VOLUME_MAX 60  // 菜单 100% 映射为硬件 60%，防止高音量炸音
 
-static uint8_t s_tts_ring[TTS_RING_SIZE];
+// Keep the large PCM ring on the heap. On Emery a static 35KB ring counts
+// against the 16-bit virtual image limit even though the same RAM is available
+// at runtime.
+static uint8_t *s_tts_ring;
 static uint32_t s_tts_head = 0;
 static uint32_t s_tts_tail = 0;
 static uint32_t s_tts_count = 0;
-static int8_t s_tts_pending_write_buf[TTS_DECODE_BYTES];
+static int8_t *s_tts_pending_write_buf;
+static int8_t *s_tts_out_buf;
 static uint16_t s_tts_pending_write_len = 0;
 static uint16_t s_tts_pending_write_offset = 0;
 static bool s_tts_playing = false;       // 是否正在播放（含缓冲中）
@@ -229,7 +367,7 @@ static AppTimer *s_tts_flow_retry_timer = NULL;
 static bool s_tts_flow_retry_pause = false;
 #endif
 
-#define R_BUF_SIZE 2048
+#define R_BUF_SIZE 1850
 static char s_reply_buf[R_BUF_SIZE];
 
 #define Q_DISPLAY_SIZE 128
@@ -246,6 +384,9 @@ static void set_state(AppState new_state);
 static void anim_tick(void *data);
 static void pulse_tick(void *data);
 static void schedule_pulse(void);
+static bool start_dictation_if_possible(void);
+static void maybe_schedule_auto_dictation(void);
+static void send_pending_question(void);
 static void dictation_callback(DictationSession *session,
                                 DictationSessionStatus status,
                                 char *transcription,
@@ -254,7 +395,15 @@ static void parse_chat_list(const char *data);
 static void parse_model_list(const char *data);
 static void show_chat_list(void);
 static void show_model_select(void);
-#if defined(PBL_PLATFORM_EMERY)
+static void show_notes(void);
+static void parse_note_list(const char *data);
+static void schedule_note_wakeup(const char *data);
+static void send_queued_note_command(void *data);
+static void schedule_sync_wakeup(const char *data);
+static void apply_sync_wakeup(void *data);
+static void clear_startup_message_guard(void *data);
+static void delayed_pop_timer(void *data);
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
 static void show_volume_select(void);
 #endif
 
@@ -272,7 +421,7 @@ static void update_response_text(void) {
     GSize text_size = text_layer_get_content_size(s_reply_layer);
     GSize q_size = text_layer_get_content_size(s_question_display_layer);
     int content_h = q_size.h + 12 + text_size.h + 20;
-    int scroll_top = CIRCLE_Y_SMALL + CIRCLE_R_SMALL + 10 + TTS_HINT_OFFSET;
+    int scroll_top = THEME_HEADER_HEIGHT + 4 + TTS_HINT_OFFSET;
     int scroll_h = s_height - scroll_top;
     if (content_h < scroll_h) content_h = scroll_h;
     s_response_content_h = content_h;
@@ -285,6 +434,35 @@ static void update_response_text(void) {
   }
 }
 
+static size_t utf8_safe_prefix_bytes(const char *text, size_t max_bytes) {
+  size_t i = 0;
+  while (text[i] != '\0' && i < max_bytes) {
+    const uint8_t lead = (uint8_t)text[i];
+    size_t char_bytes = 1;
+    if ((lead & 0x80) == 0) char_bytes = 1;
+    else if ((lead & 0xE0) == 0xC0) char_bytes = 2;
+    else if ((lead & 0xF0) == 0xE0) char_bytes = 3;
+    else if ((lead & 0xF8) == 0xF0) char_bytes = 4;
+    if (i + char_bytes > max_bytes) break;
+    i += char_bytes;
+  }
+  return i;
+}
+
+static void utf8_safe_append(char *dest, size_t dest_size, const char *source) {
+  size_t used = strlen(dest);
+  if (used >= dest_size - 1) return;
+  size_t copy_bytes = utf8_safe_prefix_bytes(source, dest_size - used - 1);
+  memcpy(dest + used, source, copy_bytes);
+  dest[used + copy_bytes] = '\0';
+}
+
+static void utf8_safe_copy(char *dest, size_t dest_size, const char *source) {
+  if (dest_size == 0) return;
+  dest[0] = '\0';
+  utf8_safe_append(dest, dest_size, source);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 健康数据读取
 //
@@ -294,29 +472,277 @@ static void update_response_text(void) {
 // ═══════════════════════════════════════════════════════════════════════════════
 static void read_health_data(void) {
 #if defined(PBL_HEALTH)
-  // 区分数据不可用与合法值（含 0）。
-  // health_service_sum_today 不可用时返回负值（time_t -1），合法 0 是正常零值。
-  // 不可用 → 发 -1 哨兵，JS 端据此不注入；合法 0 → 正常发 0，JS 端注入。
-  HealthValue steps = health_service_sum_today(HealthMetricStepCount);
-  s_step_count = (steps < 0) ? -1 : (int32_t)steps;
+  if (s_health_data) free(s_health_data);
+  s_health_data = malloc(HEALTH_DATA_SIZE);
+  if (!s_health_data) {
+    s_step_count = -1;
+    s_active_minutes = -1;
+    return;
+  }
+  s_health_data[0] = '\0';
+  time_t now = time(NULL);
+  struct tm today_tm = *localtime(&now);
+  today_tm.tm_hour = 0; today_tm.tm_min = 0; today_tm.tm_sec = 0;
 
-  HealthValue active_sec = health_service_sum_today(HealthMetricActiveSeconds);
-  s_active_minutes = (active_sec < 0) ? -1 : (int32_t)((active_sec + 30) / 60);
+  for (int offset = s_health_days - 1; offset >= 0; offset--) {
+    struct tm day_tm = today_tm;
+    day_tm.tm_mday -= offset;
+    time_t day_start = mktime(&day_tm);
+    struct tm next_tm = day_tm;
+    next_tm.tm_mday += 1;
+    time_t day_end = mktime(&next_tm);
+    if (day_end > now) day_end = now;
+
+#define HEALTH_SUM(metric) \
+    ((health_service_metric_accessible((metric), day_start, day_end) & \
+      HealthServiceAccessibilityMaskAvailable) ? \
+      health_service_sum((metric), day_start, day_end) : -1)
+    HealthValue steps = HEALTH_SUM(HealthMetricStepCount);
+    HealthValue active_sec = HEALTH_SUM(HealthMetricActiveSeconds);
+    HealthValue distance = HEALTH_SUM(HealthMetricWalkedDistanceMeters);
+    HealthValue active_kcal = HEALTH_SUM(HealthMetricActiveKCalories);
+    HealthValue resting_kcal = HEALTH_SUM(HealthMetricRestingKCalories);
+#undef HEALTH_SUM
+    HealthValue heart_avg = -1;
+    if (health_service_metric_accessible(
+          HealthMetricHeartRateBPM, day_start, day_end) &
+        HealthServiceAccessibilityMaskAvailable) {
+      heart_avg = health_service_aggregate_averaged(
+          HealthMetricHeartRateBPM, day_start, day_end,
+          HealthAggregationAvg, HealthServiceTimeScopeOnce);
+    }
+
+    HealthValue sleep_sec = -1, restful_sec = -1;
+    if (s_health_sleep) {
+      struct tm sleep_start_tm = day_tm;
+      sleep_start_tm.tm_mday -= 1;
+      sleep_start_tm.tm_hour = 12;
+      time_t sleep_start = mktime(&sleep_start_tm);
+      struct tm sleep_end_tm = day_tm;
+      sleep_end_tm.tm_hour = 12;
+      time_t sleep_end = mktime(&sleep_end_tm);
+      if (sleep_end > now) sleep_end = now;
+      if (health_service_metric_accessible(
+            HealthMetricSleepSeconds, sleep_start, sleep_end) &
+          HealthServiceAccessibilityMaskAvailable)
+        sleep_sec = health_service_sum(HealthMetricSleepSeconds, sleep_start, sleep_end);
+      if (health_service_metric_accessible(
+            HealthMetricSleepRestfulSeconds, sleep_start, sleep_end) &
+          HealthServiceAccessibilityMaskAvailable)
+        restful_sec = health_service_sum(HealthMetricSleepRestfulSeconds, sleep_start, sleep_end);
+    }
+
+    struct tm label_tm = *localtime(&day_start);
+    size_t used = strlen(s_health_data);
+    if (used < HEALTH_DATA_SIZE - 1) {
+      snprintf(s_health_data + used, HEALTH_DATA_SIZE - used,
+               "%04d-%02d-%02d|%ld|%ld|%ld|%ld|%ld|%ld|%ld|%ld\n",
+               label_tm.tm_year + 1900, label_tm.tm_mon + 1, label_tm.tm_mday,
+               (long)steps, active_sec < 0 ? -1L : (long)((active_sec + 30) / 60),
+               (long)distance, sleep_sec < 0 ? -1L : (long)((sleep_sec + 30) / 60),
+               restful_sec < 0 ? -1L : (long)((restful_sec + 30) / 60),
+               (long)active_kcal, (long)resting_kcal, (long)heart_avg);
+    }
+    if (offset == 0) {
+      s_step_count = steps < 0 ? -1 : (int32_t)steps;
+      s_active_minutes = active_sec < 0 ? -1 : (int32_t)((active_sec + 30) / 60);
+    }
+  }
+
 #else
   s_step_count = -1;   // 无健康 API 的平台：哨兵值，JS 端不注入
   s_active_minutes = -1;
+  if (s_health_data) s_health_data[0] = '\0';
 #endif
 }
 
+static void write_sleep_intervals(DictionaryIterator *iter) {
+#if defined(PBL_HEALTH)
+  if (!s_health_data) return;
+  if (!s_health_sleep || !iter) {
+    free(s_health_data);
+    s_health_data = NULL;
+    return;
+  }
+  // Reuse the aggregate-health buffer after it has already been copied into
+  // the AppMessage dictionary. This avoids another large static allocation on Emery.
+  s_health_data[0] = '\0';
+  time_t now = time(NULL);
+  SleepIntervalContext interval_ctx = {
+    .buffer = s_health_data,
+    .buffer_size = HEALTH_INTERVAL_SIZE,
+    .count = 0
+  };
+  health_service_activities_iterate(
+      HealthActivitySleep | HealthActivityRestfulSleep,
+      now - (time_t)s_health_days * 24 * 60 * 60, now,
+      // Latest-first guarantees the most recent complete sleep survives if
+      // many old deep-sleep segments fill the compact AppMessage payload.
+      HealthIterationDirectionPast, sleep_interval_callback, &interval_ctx);
+  if (s_health_data[0] != '\0')
+    dict_write_cstring(iter, MESSAGE_KEY_HEALTH_SLEEP_INTERVALS, s_health_data);
+  free(s_health_data);
+  s_health_data = NULL;
+#else
+  (void)iter;
+#endif
+}
+
+static void note_wakeup_alert(int32_t code) {
+  static const uint32_t segments[] = {
+    500, 180, 500, 180, 500, 180, 500, 180, 500
+  };
+  vibes_enqueue_custom_pattern((VibePattern){
+    .durations = segments,
+    .num_segments = ARRAY_LENGTH(segments),
+  });
+  if (s_note_wakeups) {
+    for (int i = 0; i < MAX_NOTE_WAKEUPS; i++) {
+      if (s_note_wakeups[i].code == code) {
+        strncpy(s_wakeup_note_title, s_note_wakeups[i].title,
+                sizeof(s_wakeup_note_title) - 1);
+        s_wakeup_note_title[sizeof(s_wakeup_note_title) - 1] = '\0';
+        s_wakeup_note_active = true;
+        s_note_wakeups[i].wakeup_id = -1;
+        persist_delete(PERSIST_NOTE_WAKEUP_BASE + i);
+        break;
+      }
+    }
+  }
+  if (s_canvas_layer) layer_mark_dirty(s_canvas_layer);
+}
+
+static void note_wakeup_handler(WakeupId wakeup_id, int32_t cookie) {
+  if (cookie == SYNC_WAKEUP_COOKIE) {
+    s_sync_wakeup_id = -1;
+    persist_delete(PERSIST_SYNC_WAKEUP_ID);
+    DictionaryIterator *iter;
+    if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
+      dict_write_uint8(iter, MESSAGE_KEY_SYNC_WAKEUP, 1);
+      app_message_outbox_send();
+    }
+    return;
+  }
+  note_wakeup_alert(cookie);
+}
+
+static void apply_sync_wakeup(void *data) {
+  (void)data;
+  s_sync_wakeup_timer = NULL;
+  long timestamp = s_pending_sync_wakeup_timestamp;
+  s_pending_sync_wakeup_timestamp = 0;
+
+  if (s_sync_wakeup_id >= 0) {
+    time_t old_time;
+    if (wakeup_query(s_sync_wakeup_id, &old_time)) {
+      // A repeated sync commonly asks for effectively the same wakeup. Keep
+      // the existing OS object instead of cancelling and recreating it.
+      long delta = (long)old_time - timestamp;
+      if (timestamp > (long)time(NULL) + 30 &&
+          delta > -90 && delta < 90) return;
+      wakeup_cancel(s_sync_wakeup_id);
+    }
+  }
+  s_sync_wakeup_id = -1;
+  persist_delete(PERSIST_SYNC_WAKEUP_ID);
+  if (timestamp <= (long)time(NULL) + 30) return;
+
+  WakeupId id = -1;
+  // A strong Note reminder may occupy the same one-minute Wakeup window.
+  // Move background sync by two minutes rather than silently losing it.
+  for (int attempt = 0; attempt < 5; attempt++) {
+    id = wakeup_schedule((time_t)(timestamp + attempt * 120),
+                         SYNC_WAKEUP_COOKIE, false);
+    if (id >= 0 || id != E_RANGE) break;
+  }
+  if (id >= 0) {
+    s_sync_wakeup_id = id;
+    persist_write_int(PERSIST_SYNC_WAKEUP_ID, (int)id);
+  }
+}
+
+static void schedule_sync_wakeup(const char *data) {
+  if (!data) return;
+  s_pending_sync_wakeup_timestamp = strtol(data, NULL, 10);
+  if (s_sync_wakeup_timer) app_timer_cancel(s_sync_wakeup_timer);
+  // Do not call Wakeup scheduling APIs from inside AppMessage's inbox
+  // callback. On real watches this path could terminate the app immediately
+  // after Todoist reported "Synced", even with an empty item list.
+  s_sync_wakeup_timer = app_timer_register(750, apply_sync_wakeup, NULL);
+}
+
+static void clear_startup_message_guard(void *data) {
+  (void)data;
+  s_startup_message_guard = false;
+}
+
+static void schedule_note_wakeup(const char *data) {
+  if (!data || !s_note_wakeups) return;
+  if (strncmp(data, "cancel|", 7) == 0) {
+    int32_t cancel_code = (int32_t)strtol(data + 7, NULL, 10);
+    for (int i = 0; i < MAX_NOTE_WAKEUPS; i++) {
+      if (s_note_wakeups[i].code == cancel_code) {
+        if (s_note_wakeups[i].wakeup_id >= 0)
+          wakeup_cancel(s_note_wakeups[i].wakeup_id);
+        memset(&s_note_wakeups[i], 0, sizeof(NoteWakeupSlot));
+        persist_delete(PERSIST_NOTE_WAKEUP_BASE + i);
+        break;
+      }
+    }
+    return;
+  }
+  char copy[NOTE_ID_LEN + NOTE_TITLE_LEN + 40];
+  strncpy(copy, data, sizeof(copy) - 1);
+  copy[sizeof(copy) - 1] = '\0';
+  char *p1 = strchr(copy, '|');
+  if (!p1) return;
+  *p1++ = '\0';
+  char *p2 = strchr(p1, '|');
+  if (!p2) return;
+  *p2++ = '\0';
+  char *p3 = strchr(p2, '|');
+  if (!p3) return;
+  *p3++ = '\0';
+  int32_t code = (int32_t)strtol(copy, NULL, 10);
+  time_t timestamp = (time_t)strtol(p1, NULL, 10);
+  if (timestamp <= time(NULL) + 30) return;
+
+  int slot = -1;
+  for (int i = 0; i < MAX_NOTE_WAKEUPS; i++) {
+    if (s_note_wakeups[i].code == code) {
+      slot = i;
+      if (s_note_wakeups[i].wakeup_id >= 0)
+        wakeup_cancel(s_note_wakeups[i].wakeup_id);
+      break;
+    }
+    time_t old_time;
+    if (slot < 0 && (s_note_wakeups[i].code == 0 ||
+        s_note_wakeups[i].wakeup_id < 0 ||
+        !wakeup_query(s_note_wakeups[i].wakeup_id, &old_time))) {
+      slot = i;
+    }
+  }
+  if (slot < 0) return;
+  WakeupId wakeup_id = wakeup_schedule(timestamp, code, true);
+  if (wakeup_id < 0) return;
+  NoteWakeupSlot *entry = &s_note_wakeups[slot];
+  memset(entry, 0, sizeof(*entry));
+  entry->code = code;
+  entry->wakeup_id = wakeup_id;
+  strncpy(entry->note_id, p2, sizeof(entry->note_id) - 1);
+  strncpy(entry->title, p3, sizeof(entry->title) - 1);
+  persist_write_data(PERSIST_NOTE_WAKEUP_BASE + slot, entry, sizeof(*entry));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
-// TTS 语音播放（仅 Emery 平台）
+// TTS 语音播放（Emery / Flint 扬声器平台）
 //
 // 手机端把 AI 回复经 Google TTS (8kHz 16-bit) → 取高 8 位转 raw 8bit PCM → 分块发来。
 // 手表端：收 raw PCM → 环形缓冲 → 保持原始动态 → speaker_stream_write 播放。
 // 不再使用 ADPCM 压缩：4bit ADPCM 量化噪声大（底噪）且瞬态跟随差（沙哑），
 // raw 8bit PCM 8000B/s 在蓝牙带宽（23k+ B/s）和流控范围内，音质显著提升。
 // ═══════════════════════════════════════════════════════════════════════════════
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
 static void tts_cancel_close_timer(void) {
   if (s_tts_close_timer) {
     app_timer_cancel(s_tts_close_timer);
@@ -342,13 +768,20 @@ static int tts_clamp_volume(int volume) {
   return volume;
 }
 
+static uint8_t tts_effective_speaker_volume(void) {
+  int logical = tts_clamp_volume(s_tts_volume);
+  // 保留菜单 10%-100% 的完整范围，底层按比例映射到硬件 6%-60%。
+  return (uint8_t)((logical * TTS_SPEAKER_VOLUME_MAX + 50) / 100);
+}
+
 static void tts_apply_speaker_volume(void) {
   s_tts_volume = tts_clamp_volume(s_tts_volume);
-  speaker_set_volume((uint8_t)s_tts_volume);
+  speaker_set_volume(tts_effective_speaker_volume());
 }
 
 static bool tts_write_or_buffer(const int8_t *samples, uint16_t len) {
   if (len == 0) return true;
+  if (!s_tts_pending_write_buf) return false;
 
   tts_apply_speaker_volume();
   uint32_t written = speaker_stream_write((uint8_t *)samples, len);
@@ -487,6 +920,7 @@ static void tts_flow_retry_callback(void *data) {
 
 // 把收到的 raw PCM 字节推入环形缓冲
 static void tts_push(const uint8_t *data, uint16_t len) {
+  if (!s_tts_ring) return;
   for (uint16_t i = 0; i < len; i++) {
     if (s_tts_count < TTS_RING_SIZE) {
       s_tts_ring[s_tts_tail] = data[i];
@@ -518,7 +952,7 @@ static void tts_start_playback(void) {
   tts_cancel_close_timer();
   if (!s_speaker_open) {
     s_tts_volume = tts_clamp_volume(s_tts_volume);
-    uint16_t open_volume = (uint16_t)s_tts_volume;
+    uint16_t open_volume = (uint16_t)tts_effective_speaker_volume();
     bool ok = speaker_stream_open(SpeakerPcmFormat_8kHz_8bit, open_volume);
     if (!ok) {
       // 扬声器打开失败：快速失败而非等 30s watchdog。
@@ -544,7 +978,10 @@ static void tts_playback_timer_callback(void *data) {
   s_tts_playback_timer = NULL;
   if (!s_speaker_open) return;
 
-  static int8_t s_out_buf[TTS_DECODE_BYTES];
+  if (!s_tts_out_buf || !s_tts_pending_write_buf) {
+    tts_stop();
+    return;
+  }
 
   if (!tts_flush_pending_write()) {
     s_tts_playback_timer = app_timer_register(10, tts_playback_timer_callback, NULL);
@@ -565,9 +1002,9 @@ static void tts_playback_timer_callback(void *data) {
       s_tts_count--;
       // 不在 8-bit PCM 上做数字音量衰减；低音量会损失有效位深，明显放大量化底噪。
       // 音量交给 speaker_stream_open(..., volume)，保持样本动态范围。
-      s_out_buf[i] = sample;
+      s_tts_out_buf[i] = sample;
     }
-    if (tts_write_or_buffer(s_out_buf, decode_count)) {
+    if (tts_write_or_buffer(s_tts_out_buf, decode_count)) {
       s_tts_playback_timer = app_timer_register(TTS_PLAYBACK_MS, tts_playback_timer_callback, NULL);
     } else {
       s_tts_playback_timer = app_timer_register(10, tts_playback_timer_callback, NULL);
@@ -589,9 +1026,9 @@ static void tts_playback_timer_callback(void *data) {
         int8_t sample = (int8_t)s_tts_ring[s_tts_head];
         s_tts_head = (s_tts_head + 1) % TTS_RING_SIZE;
         s_tts_count--;
-        s_out_buf[i] = sample;
+        s_tts_out_buf[i] = sample;
       }
-      if (tts_write_or_buffer(s_out_buf, decode_count)) {
+      if (tts_write_or_buffer(s_tts_out_buf, decode_count)) {
         // 缓冲已空，由 close 回调收尾
         tts_schedule_close_timer();
       } else {
@@ -658,6 +1095,10 @@ static void tts_cancel_remote(void) {
 
 // 向手机请求朗读当前回复
 static void tts_request(void) {
+  if (!s_tts_ring || !s_tts_pending_write_buf || !s_tts_out_buf) {
+    vibes_double_pulse();
+    return;
+  }
   tts_stop();          // 清掉旧状态（不发 TTS_CANCEL，避免占用 outbox）
   s_tts_playing = true;
   s_tts_loading = true;
@@ -675,14 +1116,17 @@ static void tts_request(void) {
   }
 }
 
-#endif  // PBL_PLATFORM_EMERY
+#endif  // PBL_PLATFORM_EMERY || PBL_PLATFORM_FLINT
 // 根据 s_font_size 和 s_font_bold 选择回复区域和问题显示的字体，
 // 并动态调整问题显示层高度。标题行（canvas_draw 中）在调用时也需联动。
 // ═══════════════════════════════════════════════════════════════════════════════
 static GFont get_reply_font(void) {
-  if (s_font_size == 2) return s_font_bold ? fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD) : fonts_get_system_font(FONT_KEY_GOTHIC_28);
-  if (s_font_size == 1) return s_font_bold ? fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD) : fonts_get_system_font(FONT_KEY_GOTHIC_24);
-  return s_font_bold ? fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD) : fonts_get_system_font(FONT_KEY_GOTHIC_18);
+  // Use the same 14/18/24 ladder as the question area. Previously replies
+  // started at 18 and used 18/24/28, so Chinese answers stayed visibly larger
+  // than the user's Chinese question even when Small was selected.
+  if (s_font_size == 2) return s_font_bold ? fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD) : fonts_get_system_font(FONT_KEY_GOTHIC_24);
+  if (s_font_size == 1) return s_font_bold ? fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD) : fonts_get_system_font(FONT_KEY_GOTHIC_18);
+  return s_font_bold ? fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD) : fonts_get_system_font(FONT_KEY_GOTHIC_14);
 }
 
 static GFont get_question_font(void) {
@@ -734,13 +1178,17 @@ static void draw_bg(GContext *ctx) {
   graphics_fill_rect(ctx, GRect(0, 0, s_width, s_height), 0, GCornerNone);
 }
 
-// 顶部 5 层色彩条纹装饰（3px 高）
-static void draw_color_bar(GContext *ctx) {
-  int bar_w = s_width / WAVE_LAYERS;
-  for (int i = 0; i < WAVE_LAYERS; i++) {
-    graphics_context_set_fill_color(ctx, s_wave_colors[i]);
-    graphics_fill_rect(ctx, GRect(i * bar_w, 0, bar_w + 1, 3), 0, GCornerNone);
-  }
+// Pebble-style compact screen header. It follows the Home theme selected for
+// this launch and always uses white bold text for reliable contrast.
+static void draw_theme_header(GContext *ctx, const char *title, int width) {
+  graphics_context_set_fill_color(ctx, C_MENU_HIGHLIGHT);
+  graphics_fill_rect(
+    ctx, GRect(0, 0, width, THEME_HEADER_HEIGHT), 0, GCornerNone);
+  graphics_context_set_text_color(ctx, GColorWhite);
+  graphics_draw_text(
+    ctx, title, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+    GRect(6, 1, width - 12, THEME_HEADER_HEIGHT - 1),
+    GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
 // Wi logo 路径绘制
@@ -992,7 +1440,10 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
       // 白色 Wi logo 带阴影
       draw_wi_logo(ctx, cx, cy, 100, 0, GColorWhite, true, s_heartbeat);
       {
-        const char *title = (s_active_chat_index >= 0 && s_active_chat_index < s_chat_count) ? s_chat_entries[s_active_chat_index].title : "New chat";
+        const char *title = s_sync_status[0] ? s_sync_status :
+          (s_wakeup_note_active ? s_wakeup_note_title :
+          ((s_active_chat_index >= 0 && s_active_chat_index < s_chat_count) ?
+            s_chat_entries[s_active_chat_index].title : "New chat"));
         draw_text(ctx, title, font_sub, s_subtitle_y, GColorWhite);
       }
       break;
@@ -1006,6 +1457,25 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
         draw_dots(ctx, cx, cy);
       draw_text(ctx, "Listening...", font_small, s_subtitle_y, GColorWhite);
       break;
+
+    case STATE_REVIEW: {
+      graphics_context_set_fill_color(ctx, GColorWhite);
+      graphics_fill_rect(ctx, layer_get_bounds(layer), 0, GCornerNone);
+      draw_theme_header(ctx, "Review", s_width);
+      graphics_context_set_text_color(ctx, GColorDarkGray);
+      graphics_draw_text(
+          ctx, "SELECT Send  DOWN Re-record",
+          fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+          GRect(4, THEME_HEADER_HEIGHT + 3, s_width - 8, 30),
+          GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+      graphics_context_set_fill_color(ctx, GColorLightGray);
+      graphics_fill_rect(ctx,
+                         GRect(s_width / 4,
+                               THEME_HEADER_HEIGHT + 31,
+                               s_width / 2, 1),
+                         0, GCornerNone);
+      break;
+    }
 
     case STATE_SENDING:
       draw_bg(ctx);
@@ -1039,43 +1509,29 @@ static void canvas_draw(Layer *layer, GContext *ctx) {
     case STATE_RESPONSE: {
       graphics_context_set_fill_color(ctx, GColorWhite);
       graphics_fill_rect(ctx, layer_get_bounds(layer), 0, GCornerNone);
-      draw_color_bar(ctx);
 
       const char *title = (s_active_chat_index >= 0 && s_active_chat_index < s_chat_count) ? s_chat_entries[s_active_chat_index].title : "New chat";
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
       // TTS 等待首个音频块期间，标题替换为 "Reading..." 作为加载反馈
       if (s_tts_loading) title = "Reading...";
 #endif
-      // Response 标题字体联动字号设置：Normal→GOTHIC_14_BOLD, Large→GOTHIC_18_BOLD, X-Large→GOTHIC_24_BOLD
-      GFont title_font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
-      int title_h = 20;
-      int title_y_off = -7;  // Normal 字体偏移
-      if (s_font_size == 2) { title_font = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD); title_h = 28; title_y_off = -14; }
-      else if (s_font_size == 1) { title_font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD); title_h = 24; title_y_off = -10; }
-      GSize title_size = graphics_text_layout_get_content_size(title, title_font, GRect(0, 0, s_width, title_h), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
-      // 小 Wi logo + 标题居中排列
-      int wi_w = 20;  // 缩小版 Wi 宽度
-      int total_w = wi_w + 5 + title_size.w;
-      int start_x = (s_width - total_w) / 2;
-      int wi_cx = start_x + wi_w / 2;
-      // 画缩小版 Wi logo
-      draw_wi_logo(ctx, wi_cx, CIRCLE_Y_SMALL, 30, 0, GColorDarkGray, false, 0);
-      // 标题
-      graphics_context_set_text_color(ctx, GColorDarkGray);
-      GRect title_box = GRect(start_x + wi_w + 5, CIRCLE_Y_SMALL + title_y_off, title_size.w + 10, title_h);
-      graphics_draw_text(ctx, title, title_font, title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-      // 分隔线
-      graphics_context_set_fill_color(ctx, GColorLightGray);
-      graphics_fill_rect(ctx, GRect(s_width / 4, CIRCLE_Y_SMALL + CIRCLE_R_SMALL + 6, s_width / 2, 1), 0, GCornerNone);
-#if defined(PBL_PLATFORM_EMERY)
-      // TTS 操作提示：标题分隔线下方，最小字号显示。
+      draw_theme_header(ctx, title, s_width);
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
+      // TTS 操作提示：主题标题栏下方，最小字号显示。
       // 朗读中（s_tts_playing 或 s_tts_loading）时隐藏提示（标题已变 "Reading..."，且此时提示无意义）。
       if (!s_tts_playing && !s_tts_loading) {
         GFont hint_font = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+#if defined(PBL_PLATFORM_FLINT)
+        const char *hint = s_duo_tts_enabled ?
+          "Long Press Down to TTS" : "Enable Duo TTS in Config";
+#else
         const char *hint = "Long Press Down to TTS";
+#endif
         GSize hint_size = graphics_text_layout_get_content_size(hint, hint_font, GRect(0, 0, s_width, 14), GTextOverflowModeWordWrap, GTextAlignmentCenter);
         graphics_context_set_text_color(ctx, GColorLightGray);
-        GRect hint_box = GRect((s_width - hint_size.w) / 2, CIRCLE_Y_SMALL + CIRCLE_R_SMALL + 8, hint_size.w, 14);
+        GRect hint_box = GRect((s_width - hint_size.w) / 2,
+                               THEME_HEADER_HEIGHT + 3,
+                               hint_size.w, 14);
         graphics_draw_text(ctx, hint, hint_font, hint_box, GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
       }
 #endif
@@ -1194,18 +1650,8 @@ static void anim_tick(void *data) {
       s_circle_r = s_circle_r_big;
       s_circle_y = s_circle_y_big;
       s_circle_x = s_width / 2;
-      // C3+C8 fix: 防止重复创建 dictation session，并正确切换到 RECORDING 状态
-      if (s_dictation_session) {
-        set_state(STATE_IDLE_READY);
-        return;
-      }
-      s_dictation_session = dictation_session_create(DICTATION_BUF_SIZE, dictation_callback, NULL);
-      if (s_dictation_session) {
-        set_state(STATE_RECORDING);
-        dictation_session_start(s_dictation_session);
-      } else {
-        set_state(STATE_IDLE_READY);
-      }
+      set_state(STATE_IDLE_READY);
+      start_dictation_if_possible();
       return;
     }
     s_circle_r = ease_out(CIRCLE_R_SMALL, s_circle_r_big, s_morph_step, MORPH_TOTAL);
@@ -1239,6 +1685,97 @@ static void thinking_timeout_handler(void *data) {
   }
 }
 
+// 所有手动/自动录音共用同一入口，保证同一时刻只有一个 DictationSession。
+static bool start_dictation_if_possible(void) {
+  if (s_state != STATE_IDLE_READY || s_dictation_session) return false;
+  s_dictation_session = dictation_session_create(
+      DICTATION_BUF_SIZE, dictation_callback, NULL);
+  if (!s_dictation_session) return false;
+  // Wrist AI supplies its own transcript review screen with an explicit
+  // re-record action, so skip Pebble's fixed confirmation dialog.
+  dictation_session_enable_confirmation(s_dictation_session, false);
+  set_state(STATE_RECORDING);
+  dictation_session_start(s_dictation_session);
+  return true;
+}
+
+static void auto_dictation_timer_callback(void *data) {
+  s_auto_dictation_timer = NULL;
+  // Auto Dictation 路径仅在 Quick Launch/Timeline action 入口生效；
+  // s_force_launch_dictation（Timeline action）仍无条件强制录音。
+  bool auto_ok = (s_auto_dictation && s_quick_launch_entry) ||
+                 s_force_launch_dictation;
+  if (auto_ok) {
+    s_dictation_interrupt_retry_used = false;
+    start_dictation_if_possible();
+  }
+}
+
+static void maybe_schedule_auto_dictation(void) {
+  bool auto_ok = (s_auto_dictation && s_quick_launch_entry) ||
+                 s_force_launch_dictation;
+  APP_LOG(APP_LOG_LEVEL_INFO,
+          "AutoDict decision: auto_dict=%d quick_entry=%d force=%d -> %s",
+          s_auto_dictation, (int)s_quick_launch_entry,
+          (int)s_force_launch_dictation, auto_ok ? "SCHEDULE" : "skip");
+  if (!auto_ok ||
+      s_auto_dictation_attempted ||
+      s_state != STATE_IDLE_READY || s_dictation_session) return;
+  // 注册时即标记，确保取消/失败后本次 launch 不会自动循环重试。
+  s_auto_dictation_attempted = true;
+  s_auto_dictation_timer = app_timer_register(
+      400, auto_dictation_timer_callback, NULL);
+}
+
+static void dictation_interrupt_retry_callback(void *data) {
+  s_dictation_retry_timer = NULL;
+  if (s_state == STATE_IDLE_READY && !s_dictation_session)
+    start_dictation_if_possible();
+}
+
+static void send_pending_question(void) {
+  if (!s_pending_question || !s_pending_question[0]) {
+    set_state(STATE_IDLE_READY);
+    return;
+  }
+
+  utf8_safe_copy(s_question_display, sizeof(s_question_display), "You: ");
+  utf8_safe_append(s_question_display, sizeof(s_question_display),
+                   s_pending_question);
+
+  if (s_health_enabled) {
+    read_health_data();
+  } else {
+    s_step_count = -1;
+    s_active_minutes = -1;
+  }
+
+  DictionaryIterator *iter;
+  if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
+    dict_write_cstring(iter, MESSAGE_KEY_QUESTION, s_pending_question);
+    if (s_health_enabled) {
+      dict_write_int32(iter, MESSAGE_KEY_STEP_COUNT, s_step_count);
+      dict_write_int32(iter, MESSAGE_KEY_ACTIVE_MINUTES, s_active_minutes);
+      if (s_health_data && s_health_data[0] != '\0')
+        dict_write_cstring(iter, MESSAGE_KEY_HEALTH_DATA, s_health_data);
+      write_sleep_intervals(iter);
+    }
+    if (s_launch_context[0] != '\0')
+      dict_write_cstring(iter, MESSAGE_KEY_LAUNCH_CONTEXT, s_launch_context);
+    app_message_outbox_send();
+    free(s_pending_question);
+    s_pending_question = NULL;
+    set_state(STATE_SENDING);
+  } else {
+    if (s_health_data) {
+      free(s_health_data);
+      s_health_data = NULL;
+    }
+    vibes_double_pulse();
+    set_state(STATE_REVIEW);
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Dictation 回调（前向声明需要，放在 anim_tick 之后）
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1246,37 +1783,41 @@ static void dictation_callback(DictationSession *session,
                                 DictationSessionStatus status,
                                 char *transcription,
                                 void *context) {
-  if (status == DictationSessionStatusSuccess && transcription && transcription[0] != '\0') {
-    // 保存问题用于显示
-    snprintf(s_question_display, sizeof(s_question_display), "You: %s", transcription);
-    
-    // 读取最新健康数据（仅在用户开启时）
-    if (s_health_enabled) {
-      read_health_data();
-    } else {
-      s_step_count = -1;   // 开关关闭：哨兵值（且不发 STEP_COUNT，JS 端默认 -1 不注入）
-      s_active_minutes = -1;
-    }
+  if (s_dictation_session) {
+    dictation_session_destroy(s_dictation_session);
+    s_dictation_session = NULL;
+  }
 
-    DictionaryIterator *iter;
-    if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
-      dict_write_cstring(iter, MESSAGE_KEY_QUESTION, transcription);
-      if (s_health_enabled) {
-        dict_write_int32(iter, MESSAGE_KEY_STEP_COUNT, s_step_count);
-        dict_write_int32(iter, MESSAGE_KEY_ACTIVE_MINUTES, s_active_minutes);
-      }
-      app_message_outbox_send();
-      set_state(STATE_SENDING);
-    } else {
-      // 发送失败，回到就绪
+  if (status == DictationSessionStatusSuccess && transcription && transcription[0] != '\0') {
+    if (s_pending_question) free(s_pending_question);
+    size_t transcription_len = strlen(transcription);
+    s_pending_question = malloc(transcription_len + 1);
+    if (!s_pending_question) {
+      vibes_double_pulse();
       set_state(STATE_IDLE_READY);
+      return;
     }
+    memcpy(s_pending_question, transcription, transcription_len + 1);
+    text_layer_set_text(s_question_display_layer, "");
+    text_layer_set_text(s_reply_layer, s_pending_question);
+    set_state(STATE_REVIEW);
+    vibes_short_pulse();
+    s_dictation_interrupt_retry_used = false;
+  } else if (status == DictationSessionStatusFailureSystemAborted &&
+             !s_dictation_interrupt_retry_used) {
+    // Notifications and other system overlays can abort Dictation. Retry once
+    // after the overlay goes away; never loop indefinitely.
+    s_dictation_interrupt_retry_used = true;
+    set_state(STATE_IDLE_READY);
+    if (s_dictation_retry_timer)
+      app_timer_cancel(s_dictation_retry_timer);
+    s_dictation_retry_timer = app_timer_register(
+        700, dictation_interrupt_retry_callback, NULL);
   } else {
     vibes_short_pulse();  // 提示用户 Dictation 被取消
+    s_dictation_interrupt_retry_used = false;
     set_state(STATE_IDLE_READY);
   }
-  dictation_session_destroy(s_dictation_session);
-  s_dictation_session = NULL;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1286,7 +1827,7 @@ static void set_state(AppState new_state) {
   stop_anim();
   s_state = new_state;
 
-  bool show_scroll = (new_state == STATE_RESPONSE);
+  bool show_scroll = (new_state == STATE_RESPONSE || new_state == STATE_REVIEW);
   layer_set_hidden(scroll_layer_get_layer(s_scroll_layer), !show_scroll);
 
   switch (new_state) {
@@ -1302,6 +1843,26 @@ static void set_state(AppState new_state) {
     case STATE_THINKING:
       start_anim();
       break;
+
+    case STATE_REVIEW: {
+      text_layer_set_text_color(s_question_display_layer, GColorDarkGray);
+      text_layer_set_text(s_question_display_layer, "");
+      text_layer_set_text(s_reply_layer,
+                          s_pending_question ? s_pending_question : "");
+      layer_set_frame(text_layer_get_layer(s_reply_layer),
+                      GRect(8, 4, s_width - 16, 2000));
+      GSize review_size = text_layer_get_content_size(s_reply_layer);
+      int visible_h = layer_get_bounds(
+          scroll_layer_get_layer(s_scroll_layer)).size.h;
+      s_response_content_h = review_size.h + 12;
+      if (s_response_content_h < visible_h)
+        s_response_content_h = visible_h;
+      scroll_layer_set_content_size(
+          s_scroll_layer, GSize(s_width, s_response_content_h));
+      scroll_layer_set_content_offset(s_scroll_layer, GPointZero, false);
+      s_user_scrolled = false;
+      break;
+    }
 
     case STATE_SHRINKING:
       s_morph_step = 0;
@@ -1331,7 +1892,7 @@ static void set_state(AppState new_state) {
       text_layer_set_text_color(s_question_display_layer, GColorDarkGray);
       text_layer_set_text(s_question_display_layer, s_question_display);
       {
-        int scroll_top = CIRCLE_Y_SMALL + CIRCLE_R_SMALL + 10 + TTS_HINT_OFFSET;
+        int scroll_top = THEME_HEADER_HEIGHT + 4 + TTS_HINT_OFFSET;
         GSize q_size = text_layer_get_content_size(s_question_display_layer);
         int reply_y = q_size.h + 12;
         layer_set_frame(text_layer_get_layer(s_reply_layer), GRect(8, reply_y, s_width - 16, 2000));
@@ -1389,6 +1950,8 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     persist_write_bool(PERSIST_KEY_READY, ready);
     if (s_state == STATE_IDLE_NO_KEY || s_state == STATE_IDLE_READY) {
       set_state(ready ? STATE_IDLE_READY : STATE_IDLE_NO_KEY);
+      // 必须等本次启动的 AUTO_DICTATION 设置同步完成，不能使用上次持久化值抢跑。
+      if (ready && s_auto_dictation_synced) maybe_schedule_auto_dictation();
     }
   }
 
@@ -1413,6 +1976,68 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
       }
     }
     list_updated = true;
+  }
+
+  Tuple *note_list_t = dict_find(iter, MESSAGE_KEY_NOTE_LIST);
+  if (note_list_t) {
+    MenuIndex previous_note_selection = { .section = 0, .row = 0 };
+    bool can_reload_notes =
+      s_notes_menu_layer && !s_note_actions_visible;
+    if (can_reload_notes) {
+      previous_note_selection =
+        menu_layer_get_selected_index(s_notes_menu_layer);
+      // 解析新列表前先把 SDK 内部索引移到旧列表一定存在的安全行。
+      // 删除最后一项时，新行数会减少；如果带着旧索引 reload，部分 Pebble
+      // 固件会在 draw_row 前直接越界。
+      MenuIndex safe_selection = { .section = 0, .row = 0 };
+      menu_layer_set_selected_index(s_notes_menu_layer, safe_selection,
+                                    MenuRowAlignNone, false);
+    }
+    parse_note_list(note_list_t->value->cstring);
+    if (can_reload_notes) {
+      uint16_t rows = s_note_count > 0 ? s_note_count : 1;
+      menu_layer_reload_data(s_notes_menu_layer);
+      previous_note_selection.section = 0;
+      if (previous_note_selection.row >= rows)
+        previous_note_selection.row = rows - 1;
+      menu_layer_set_selected_index(s_notes_menu_layer,
+                                    previous_note_selection,
+                                    MenuRowAlignNone, false);
+      s_notes_list_dirty = false;
+    } else if (s_notes_menu_layer) {
+      s_notes_list_dirty = true;
+    }
+  }
+  Tuple *note_wakeup_t = dict_find(iter, MESSAGE_KEY_NOTE_WAKEUP);
+  if (!s_startup_message_guard &&
+      note_wakeup_t && note_wakeup_t->type == TUPLE_CSTRING)
+    schedule_note_wakeup(note_wakeup_t->value->cstring);
+  Tuple *sync_wakeup_t = dict_find(iter, MESSAGE_KEY_SYNC_WAKEUP);
+  if (!s_startup_message_guard &&
+      sync_wakeup_t && sync_wakeup_t->type == TUPLE_CSTRING)
+    schedule_sync_wakeup(sync_wakeup_t->value->cstring);
+  Tuple *sync_status_t = dict_find(iter, MESSAGE_KEY_SYNC_STATUS);
+  if (sync_status_t && sync_status_t->type == TUPLE_CSTRING) {
+    utf8_safe_copy(s_sync_status, sizeof(s_sync_status),
+                   sync_status_t->value->cstring);
+    if (s_canvas_layer) layer_mark_dirty(s_canvas_layer);
+    if (s_sync_wakeup_launch &&
+        (strncmp(s_sync_status, "Synced", 6) == 0 ||
+         strncmp(s_sync_status, "Offline", 7) == 0 ||
+         strncmp(s_sync_status, "Sync failed", 11) == 0)) {
+      s_sync_wakeup_launch = false;
+      app_timer_register(1800, delayed_pop_timer, NULL);
+    }
+  }
+  Tuple *theme_t = dict_find(iter, MESSAGE_KEY_THEME_COLOR);
+  if (theme_t) {
+    int value = (int)theme_t->value->int32;
+    if (value < -1 || value >= FILL_PALETTE_SIZE) value = -1;
+    s_theme_color = value;
+    persist_write_int(PERSIST_KEY_THEME_COLOR, s_theme_color);
+    if (s_theme_color >= 0)
+      s_bg_color = s_fill_palette[s_theme_color];
+    layer_mark_dirty(s_canvas_layer);
   }
 
   if (list_updated) {
@@ -1466,6 +2091,37 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     persist_write_int(PERSIST_KEY_HEALTH_ENABLED, s_health_enabled);
   }
 
+  Tuple *auto_dictation_t = dict_find(iter, MESSAGE_KEY_AUTO_DICTATION);
+  if (auto_dictation_t) {
+    s_auto_dictation_synced = true;
+    s_auto_dictation = auto_dictation_t->value->uint8 ? 1 : 0;
+    persist_write_int(PERSIST_KEY_AUTO_DICTATION, s_auto_dictation);
+    if (!s_auto_dictation && !s_force_launch_dictation &&
+        s_auto_dictation_timer) {
+      app_timer_cancel(s_auto_dictation_timer);
+      s_auto_dictation_timer = NULL;
+    } else {
+      maybe_schedule_auto_dictation();
+    }
+  }
+
+  Tuple *health_days_t = dict_find(iter, MESSAGE_KEY_HEALTH_DAYS);
+  if (health_days_t) {
+    int days = (int)health_days_t->value->uint8;
+    s_health_days = (days == 1 || days == 3 || days == 7) ? days : 7;
+    persist_write_int(PERSIST_KEY_HEALTH_DAYS, s_health_days);
+  }
+  Tuple *health_sleep_t = dict_find(iter, MESSAGE_KEY_HEALTH_SLEEP);
+  if (health_sleep_t) {
+    s_health_sleep = health_sleep_t->value->uint8 ? 1 : 0;
+    persist_write_int(PERSIST_KEY_HEALTH_SLEEP, s_health_sleep);
+  }
+  Tuple *duo_tts_t = dict_find(iter, MESSAGE_KEY_DUO_TTS_ENABLED);
+  if (duo_tts_t) {
+    s_duo_tts_enabled = duo_tts_t->value->uint8 ? 1 : 0;
+    persist_write_int(PERSIST_KEY_DUO_TTS, s_duo_tts_enabled);
+  }
+
   // 联网搜索开关 (0=关闭, 1=开启，默认开，仅 OpenRouter 生效由 JS 端判断)
   Tuple *web_search_t = dict_find(iter, MESSAGE_KEY_WEB_SEARCH_ENABLED);
   if (web_search_t) {
@@ -1477,7 +2133,8 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   // 用户问题（切换对话时由 JS 发来的历史问题）
   Tuple *user_q_t = dict_find(iter, MESSAGE_KEY_USER_QUESTION);
   if (user_q_t) {
-    snprintf(s_question_display, sizeof(s_question_display), "You: %s", user_q_t->value->cstring);
+    utf8_safe_copy(s_question_display, sizeof(s_question_display), "You: ");
+    utf8_safe_append(s_question_display, sizeof(s_question_display), user_q_t->value->cstring);
     // 为新内容做准备：清空回复缓冲区，如果已在 RESPONSE 则重置布局
     s_reply_buf[0] = '\0';
     if (s_state == STATE_RESPONSE) {
@@ -1498,7 +2155,7 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
       s_reply_buf[0] = '\0';
       set_state(STATE_RESPONSE);
     }
-    strncat(s_reply_buf, reply_chunk_t->value->cstring, sizeof(s_reply_buf) - strlen(s_reply_buf) - 1);
+    utf8_safe_append(s_reply_buf, sizeof(s_reply_buf), reply_chunk_t->value->cstring);
     if (s_state == STATE_RESPONSE) {
       update_response_text();
     }
@@ -1507,7 +2164,7 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
       set_state(STATE_SHRINKING);
     }
   } else if (reply_t) {
-    snprintf(s_reply_buf, sizeof(s_reply_buf), "%s", reply_t->value->cstring);
+    utf8_safe_copy(s_reply_buf, sizeof(s_reply_buf), reply_t->value->cstring);
     if (s_state == STATE_THINKING || s_state == STATE_SENDING) {
       // 缩小动画 → RESPONSE
       set_state(STATE_SHRINKING);
@@ -1518,7 +2175,7 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
 
   Tuple *status_t = dict_find(iter, MESSAGE_KEY_STATUS);
   if (status_t && !reply_t && !reply_chunk_t) {
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
     // TTS 失败回传的 STATUS：清理 TTS 状态，不污染回复内容。
     // 区分 TTS 错误与普通错误：JS 端 TTS 错误的 STATUS 文本以 "TTS" 开头
     // （如 "TTS error: HTTP 403"、"TTS: API key invalid"、"No TTS API key" 等）。
@@ -1540,7 +2197,7 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
         strncat(s_reply_buf, status_t->value->cstring, remaining);
       }
     } else if (strlen(s_reply_buf) == 0) {
-      snprintf(s_reply_buf, sizeof(s_reply_buf), "%s", status_t->value->cstring);
+      utf8_safe_copy(s_reply_buf, sizeof(s_reply_buf), status_t->value->cstring);
     }
     
     // 如果还没进入文字界面，提前进入
@@ -1551,7 +2208,7 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     }
   }
 
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
   // TTS 音频分块（raw 8bit PCM 字节）
   Tuple *tts_chunk_t = dict_find(iter, MESSAGE_KEY_TTS_CHUNK);
   if (tts_chunk_t) {
@@ -1627,10 +2284,22 @@ static void inbox_dropped(AppMessageResult reason, void *ctx) {
 
 static void outbox_sent(DictionaryIterator *iter, void *ctx) {
   APP_LOG(APP_LOG_LEVEL_DEBUG, "Sent OK");
+  Tuple *note_command = dict_find(iter, MESSAGE_KEY_NOTE_COMMAND);
+  if (note_command && strcmp(note_command->value->cstring,
+                             s_pending_note_command) == 0) {
+    persist_delete(PERSIST_KEY_NOTE_COMMAND);
+    s_pending_note_command[0] = '\0';
+  }
 }
 
 static void outbox_failed(DictionaryIterator *iter, AppMessageResult reason, void *ctx) {
   APP_LOG(APP_LOG_LEVEL_ERROR, "Send fail: %d", (int)reason);
+  if (dict_find(iter, MESSAGE_KEY_NOTE_COMMAND)) {
+    if (!s_note_command_timer)
+      s_note_command_timer =
+        app_timer_register(1500, send_queued_note_command, NULL);
+    return;
+  }
   // 问答路径：发送失败回退到就绪
   if (s_state == STATE_SENDING || s_state == STATE_THINKING) {
     snprintf(s_reply_buf, sizeof(s_reply_buf), "Send failed. Try again.");
@@ -1638,7 +2307,7 @@ static void outbox_failed(DictionaryIterator *iter, AppMessageResult reason, voi
     set_state(STATE_SHRINKING);
     return;
   }
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
   Tuple *tts_pause_t = dict_find(iter, MESSAGE_KEY_TTS_PAUSE);
   Tuple *tts_resume_t = dict_find(iter, MESSAGE_KEY_TTS_RESUME);
   if (tts_pause_t || tts_resume_t) {
@@ -1670,7 +2339,7 @@ static void outbox_failed(DictionaryIterator *iter, AppMessageResult reason, voi
 // DOWN 长按：彩蛋（随机发送预设问题）
 // ═══════════════════════════════════════════════════════════════════════════════
 static void select_handler(ClickRecognizerRef r, void *ctx) {
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
   // TTS 播放中 → 短按 SELECT 停止朗读
   if (s_tts_playing) {
     tts_stop();
@@ -1679,13 +2348,10 @@ static void select_handler(ClickRecognizerRef r, void *ctx) {
   }
 #endif
   if (s_state == STATE_IDLE_READY) {
-    // C7+C8 fix: 防重复创建 + 立即切到 RECORDING 状态
-    if (s_dictation_session) return;
-    s_dictation_session = dictation_session_create(DICTATION_BUF_SIZE, dictation_callback, NULL);
-    if (s_dictation_session) {
-      set_state(STATE_RECORDING);
-      dictation_session_start(s_dictation_session);
-    }
+    s_dictation_interrupt_retry_used = false;
+    start_dictation_if_possible();
+  } else if (s_state == STATE_REVIEW) {
+    send_pending_question();
   } else if (s_state == STATE_RESPONSE) {
     // 短按回复界面：回到大圆（可继续追问）
     set_state(STATE_EXPANDING);
@@ -1701,7 +2367,7 @@ static void select_long_handler(ClickRecognizerRef r, void *ctx) {
     vibes_double_pulse();
     return;
   }
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
   if (s_tts_playing) { tts_stop(); tts_cancel_remote(); vibes_double_pulse(); return; }
 #endif
 
@@ -1739,7 +2405,8 @@ static void select_long_handler(ClickRecognizerRef r, void *ctx) {
 
 // ── 导航与配置 ─────────────────────────────────────────────────────────────────
 static void scroll_response_by(int dy) {
-  if (s_state != STATE_RESPONSE || !s_scroll_layer) return;
+  if ((s_state != STATE_RESPONSE && s_state != STATE_REVIEW) ||
+      !s_scroll_layer) return;
 
   s_user_scrolled = true;  // 用户手动滚动后停止自动滚到顶部
 
@@ -1758,7 +2425,7 @@ static void scroll_response_by(int dy) {
   if (offset.y < min_y) offset.y = min_y;
 
   bool animated = true;
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
   // 播放 TTS 时 speaker pump/AppMessage 已经在高频跑；ScrollLayer 动画会再叠一组内部定时器。
   // 这里改成立即跳转，保留翻页能力，同时避开播放中动画滚动导致的偶发崩溃。
   if (s_tts_playing || s_tts_loading) {
@@ -1770,7 +2437,7 @@ static void scroll_response_by(int dy) {
 
 // UP 短按：在回复状态向上滚动；其他状态打开菜单
 static void up_handler(ClickRecognizerRef r, void *ctx) {
-  if (s_state == STATE_RESPONSE) {
+  if (s_state == STATE_RESPONSE || s_state == STATE_REVIEW) {
     scroll_response_by(60);
   } else {
     show_chat_list();
@@ -1779,7 +2446,7 @@ static void up_handler(ClickRecognizerRef r, void *ctx) {
 
 // UP 长按：始终打开菜单
 static void up_long_handler(ClickRecognizerRef r, void *ctx) {
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
   if (s_tts_playing || s_tts_loading) {
     vibes_double_pulse();
     return;
@@ -1790,16 +2457,40 @@ static void up_long_handler(ClickRecognizerRef r, void *ctx) {
 
 // DOWN 短按：回复页面向下滚动 60px，其他状态打开菜单
 static void down_handler(ClickRecognizerRef r, void *ctx) {
-  if (s_state == STATE_RESPONSE) {
+  if (s_state == STATE_REVIEW) {
+    text_layer_set_text(s_reply_layer, "");
+    if (s_pending_question) {
+      free(s_pending_question);
+      s_pending_question = NULL;
+    }
+    s_dictation_interrupt_retry_used = false;
+    set_state(STATE_IDLE_READY);
+    start_dictation_if_possible();
+  } else if (s_state == STATE_RESPONSE) {
     scroll_response_by(-60);
   } else {
-    show_chat_list();
+    show_notes();
   }
+}
+
+static void back_handler(ClickRecognizerRef r, void *ctx) {
+  if (s_state != STATE_REVIEW) {
+    window_stack_pop(true);
+    return;
+  }
+  text_layer_set_text(s_reply_layer, "");
+  if (s_pending_question) {
+    free(s_pending_question);
+    s_pending_question = NULL;
+  }
+  s_dictation_interrupt_retry_used = false;
+  set_state(STATE_IDLE_READY);
+  vibes_short_pulse();
 }
 
 // DOWN 长按：Emery 上朗读/调节音量 / 其他平台彩蛋功能
 static void down_long_handler(ClickRecognizerRef r, void *ctx) {
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
   // 音量现在在 UP 菜单里预先选择，speaker 打开时生效；播放中不做实时重开。
   if (s_tts_playing || s_tts_loading) {
     vibes_double_pulse();
@@ -1807,6 +2498,12 @@ static void down_long_handler(ClickRecognizerRef r, void *ctx) {
   }
   // 在 RESPONSE 状态 → 请求朗读当前回复
   if (s_state == STATE_RESPONSE) {
+#if defined(PBL_PLATFORM_FLINT)
+    if (!s_duo_tts_enabled) {
+      vibes_double_pulse();
+      return;
+    }
+#endif
     tts_request();
     return;
   }
@@ -1817,7 +2514,8 @@ static void down_long_handler(ClickRecognizerRef r, void *ctx) {
     return;
   }
   // 处理中不允许触发彩蛋（含 RECORDING：录音中长按 DOWN 会与 dictation 冲突）
-  if (s_state == STATE_RECORDING || s_state == STATE_SENDING ||
+  if (s_state == STATE_RECORDING || s_state == STATE_REVIEW ||
+      s_state == STATE_SENDING ||
       s_state == STATE_THINKING ||
       s_state == STATE_SHRINKING || s_state == STATE_EXPANDING) {
     vibes_double_pulse();
@@ -1851,7 +2549,12 @@ static void down_long_handler(ClickRecognizerRef r, void *ctx) {
     if (s_health_enabled) {
       dict_write_int32(iter, MESSAGE_KEY_STEP_COUNT, s_step_count);
       dict_write_int32(iter, MESSAGE_KEY_ACTIVE_MINUTES, s_active_minutes);
+      if (s_health_data && s_health_data[0] != '\0')
+        dict_write_cstring(iter, MESSAGE_KEY_HEALTH_DATA, s_health_data);
+      write_sleep_intervals(iter);
     }
+    if (s_launch_context[0] != '\0')
+      dict_write_cstring(iter, MESSAGE_KEY_LAUNCH_CONTEXT, s_launch_context);
     app_message_outbox_send();
     vibes_short_pulse();
     set_state(STATE_SENDING);
@@ -1870,6 +2573,7 @@ static void click_config(void *ctx) {
   window_long_click_subscribe(BUTTON_ID_UP, 700, up_long_handler, NULL);
   window_single_click_subscribe(BUTTON_ID_DOWN, down_handler);
   window_long_click_subscribe(BUTTON_ID_DOWN, 700, down_long_handler, NULL);
+  window_single_click_subscribe(BUTTON_ID_BACK, back_handler);
 }
 
 static void window_load(Window *window) {
@@ -1893,13 +2597,19 @@ static void window_load(Window *window) {
   // 收缩动画时的圆心 X：圆形屏居中更协调，方形屏居左
   s_circle_target_x = PBL_IF_ROUND_ELSE(s_width / 2, 24);
 
-  // 随机初始化背景色 + 色彩条纹
+  // 初始化随机或 Config 固定主题色。
   srand(time(NULL));
-  s_bg_color = s_palette[rand() % PALETTE_SIZE];
+  s_theme_color = persist_exists(PERSIST_KEY_THEME_COLOR) ?
+    (int)persist_read_int(PERSIST_KEY_THEME_COLOR) : -1;
+  if (s_theme_color < -1 || s_theme_color >= FILL_PALETTE_SIZE)
+    s_theme_color = -1;
+  s_bg_color = s_theme_color >= 0 ?
+    s_fill_palette[s_theme_color] :
+    s_fill_palette[rand() % FILL_PALETTE_SIZE];
   // 色彩条纹：从随机起点取相邻色，确保配色和谐（步长 2 增加色域跨度）
-  int stripe_base = rand() % PALETTE_SIZE;
+  int stripe_base = rand() % STRIPE_PALETTE_SIZE;
   for (int i = 0; i < WAVE_LAYERS; i++) {
-    s_wave_colors[i] = s_palette[(stripe_base + i * 2) % PALETTE_SIZE];
+    s_wave_colors[i] = s_stripe_palette[(stripe_base + i * 2) % STRIPE_PALETTE_SIZE];
   }
 
   // Canvas 层
@@ -1907,8 +2617,8 @@ static void window_load(Window *window) {
   layer_set_update_proc(s_canvas_layer, canvas_draw);
   layer_add_child(root, s_canvas_layer);
 
-  // Scroll 层 (回复显示区) — Emery 下移 TTS_HINT_OFFSET 给标题区 TTS 提示留空间
-  int scroll_top = CIRCLE_Y_SMALL + CIRCLE_R_SMALL + (PBL_IF_ROUND_ELSE(12, 8)) + TTS_HINT_OFFSET;
+  // Scroll 层位于主题标题栏下；扬声器平台再为 TTS 提示保留空间。
+  int scroll_top = THEME_HEADER_HEIGHT + 4 + TTS_HINT_OFFSET;
   s_scroll_layer = scroll_layer_create(GRect(0, scroll_top, s_width, s_height - scroll_top));
   scroll_layer_set_click_config_onto_window(s_scroll_layer, window);
   // 恢复窗口基础点击（覆盖 ScrollLayer 的默认行为以便响应 UP/DOWN）
@@ -1954,7 +2664,18 @@ static void window_load(Window *window) {
   s_disable_surprise = persist_exists(PERSIST_KEY_DISABLE_SURPRISE) ? (int)persist_read_int(PERSIST_KEY_DISABLE_SURPRISE) : 0;
   s_health_enabled = persist_exists(PERSIST_KEY_HEALTH_ENABLED) ? (int)persist_read_int(PERSIST_KEY_HEALTH_ENABLED) : 0;
   s_web_search = persist_exists(PERSIST_KEY_WEB_SEARCH) ? (int)persist_read_int(PERSIST_KEY_WEB_SEARCH) : 1;
-#if defined(PBL_PLATFORM_EMERY)
+  s_auto_dictation = persist_exists(PERSIST_KEY_AUTO_DICTATION) ? (int)persist_read_int(PERSIST_KEY_AUTO_DICTATION) : 0;
+  s_health_days = persist_exists(PERSIST_KEY_HEALTH_DAYS) ? (int)persist_read_int(PERSIST_KEY_HEALTH_DAYS) : 7;
+  if (s_health_days != 1 && s_health_days != 3 && s_health_days != 7) s_health_days = 7;
+  s_health_sleep = persist_exists(PERSIST_KEY_HEALTH_SLEEP) ? (int)persist_read_int(PERSIST_KEY_HEALTH_SLEEP) : 1;
+  s_duo_tts_enabled = persist_exists(PERSIST_KEY_DUO_TTS) ? (int)persist_read_int(PERSIST_KEY_DUO_TTS) : 0;
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
+  if (!s_tts_ring)
+    s_tts_ring = malloc(TTS_RING_SIZE);
+  if (!s_tts_pending_write_buf)
+    s_tts_pending_write_buf = malloc(TTS_DECODE_BYTES);
+  if (!s_tts_out_buf)
+    s_tts_out_buf = malloc(TTS_DECODE_BYTES);
   s_tts_volume = persist_exists(PERSIST_KEY_TTS_VOLUME) ? (int)persist_read_int(PERSIST_KEY_TTS_VOLUME) : 100;
   s_tts_volume = tts_clamp_volume(s_tts_volume);
 #endif
@@ -1963,8 +2684,20 @@ static void window_load(Window *window) {
 }
 
 static void window_unload(Window *window) {
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
   tts_stop();
+  if (s_tts_pending_write_buf) {
+    free(s_tts_pending_write_buf);
+    s_tts_pending_write_buf = NULL;
+  }
+  if (s_tts_out_buf) {
+    free(s_tts_out_buf);
+    s_tts_out_buf = NULL;
+  }
+  if (s_tts_ring) {
+    free(s_tts_ring);
+    s_tts_ring = NULL;
+  }
 #endif
   layer_destroy(s_canvas_layer);
   scroll_layer_destroy(s_scroll_layer);
@@ -1983,7 +2716,7 @@ static void window_appear(Window *window) {
 //   row 0     — 模型行（显示当前模型名，点击打开模型选择子菜单）
 //   row 1     — 「+ START NEW CHAT」按钮
 //   row 2     — 联网搜索开关（显示 ON/OFF，点击切换并同步给手机）
-//   row 3     — TTS 音量（仅 Emery，点击打开本地音量选择）
+//   row 3     — TTS 音量（Emery / Flint，点击打开本地音量选择）
 //   row 3/4+  — 历史对话列表（活跃对话有 Celeste 底色 + 蓝点标记）
 //
 // 配色规则：
@@ -2003,7 +2736,7 @@ static const char *model_short_name(const char *full) {
 }
 
 static uint16_t menu_fixed_rows(void) {
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
   return 4;
 #else
   return 3;
@@ -2025,9 +2758,9 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *idx
   MenuIndex sel = menu_layer_get_selected_index(menu);
   bool highlighted = (sel.row == idx->row && sel.section == idx->section);
 
-  // 高亮背景（所有行通用）
+  // 高亮背景跟随本次进入主页时抽到的主题色；文字始终用白色保证对比。
   if (highlighted) {
-    graphics_context_set_fill_color(ctx, GColorCobaltBlue);
+    graphics_context_set_fill_color(ctx, C_MENU_HIGHLIGHT);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
   }
 
@@ -2051,10 +2784,10 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *idx
   }
 
   if (idx->row == 1) {
-    // ── 新建对话按钮：无底色 ──
+    // ── ToDo & Notes 入口 ──
     graphics_context_set_text_color(ctx, highlighted ? GColorWhite : C_ACCENT);
     GRect add_rect = GRect(0, bounds.size.h / 2 - 12, bounds.size.w, 24);
-    graphics_draw_text(ctx, "+ START NEW CHAT", fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+    graphics_draw_text(ctx, "ToDo & Notes", fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
                        add_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
     return;
   }
@@ -2074,7 +2807,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *idx
     return;
   }
 
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
   if (idx->row == 3) {
     // ── TTS 音量行：标签 + 当前百分比 ──
     graphics_context_set_text_color(ctx, highlighted ? GColorWhite : C_ACCENT);
@@ -2124,8 +2857,18 @@ static void delayed_pop_timer(void *data) {
   window_stack_pop(true);
 }
 
+// Note open 需要连弹两层(operations → notes → 主界面),用第二次定时器串行,
+// 避免在 MenuLayer 的 select 回调里同步 pop 自毁回调所属对象导致 UAF。
+static void delayed_pop_twice_second(void *data) {
+  window_stack_pop(true);
+}
+static void delayed_pop_twice_first(void *data) {
+  window_stack_pop(false);  // 先弹 note_actions(无动画,立即 unload)
+  app_timer_register(10, delayed_pop_twice_second, NULL);  // 再弹 notes 列表
+}
+
 static void menu_select_click(MenuLayer *menu, MenuIndex *idx, void *ctx) {
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
   // 切换对话前停止 TTS（防止旧回复音频继续播放，含加载阶段）
   if (s_tts_playing || s_tts_loading) {
     tts_stop();
@@ -2143,19 +2886,8 @@ static void menu_select_click(MenuLayer *menu, MenuIndex *idx, void *ctx) {
   }
 
   if (idx->row == 1) {
-    // 点击新建对话
-    s_active_chat_index = -1;
-    DictionaryIterator *iter;
-    if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
-      dict_write_cstring(iter, MESSAGE_KEY_SWITCH_CHAT, "");
-      app_message_outbox_send();
-    }
-
-    if (s_state == STATE_RESPONSE) {
-      s_reply_buf[0] = '\0';
-      set_state(STATE_IDLE_READY);
-    }
-    app_timer_register(100, delayed_pop_timer, NULL);
+    // 点击 Notes / TODOs 入口
+    show_notes();
     return;
   }
 
@@ -2173,7 +2905,7 @@ static void menu_select_click(MenuLayer *menu, MenuIndex *idx, void *ctx) {
     return;
   }
 
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
   if (idx->row == 3) {
     show_volume_select();
     return;
@@ -2214,10 +2946,18 @@ static void menu_select_click(MenuLayer *menu, MenuIndex *idx, void *ctx) {
   app_timer_register(100, delayed_pop_timer, NULL);
 }
 
-// 菜单顶部色彩条纹绘制回调
+// 菜单顶部主题标题栏
 static Layer *s_menu_bar_layer = NULL;
 static void menu_bar_draw(Layer *layer, GContext *ctx) {
-  draw_color_bar(ctx);
+  draw_theme_header(ctx, "Setting", layer_get_bounds(layer).size.w);
+}
+
+static void notes_bar_draw(Layer *layer, GContext *ctx) {
+  draw_theme_header(ctx, "ToDo & Notes", layer_get_bounds(layer).size.w);
+}
+
+static void note_actions_bar_draw(Layer *layer, GContext *ctx) {
+  draw_theme_header(ctx, "Note", layer_get_bounds(layer).size.w);
 }
 
 static void list_window_load(Window *window) {
@@ -2226,8 +2966,9 @@ static void list_window_load(Window *window) {
 
   window_set_background_color(window, C_BG);
 
-  // 菜单从 3px 下方开始，给色彩条纹留空间
-  s_menu_layer = menu_layer_create(GRect(0, 3, bounds.size.w, bounds.size.h - 3));
+  s_menu_layer = menu_layer_create(
+    GRect(0, THEME_HEADER_HEIGHT, bounds.size.w,
+          bounds.size.h - THEME_HEADER_HEIGHT));
   menu_layer_set_callbacks(s_menu_layer, s_menu_layer, (MenuLayerCallbacks){
     .get_num_rows = menu_get_num_rows,
     .get_cell_height = menu_get_cell_height,
@@ -2235,12 +2976,13 @@ static void list_window_load(Window *window) {
     .select_click = menu_select_click,
   });
   menu_layer_set_normal_colors(s_menu_layer, C_BG, C_TEXT_LIGHT);
-  menu_layer_set_highlight_colors(s_menu_layer, GColorCobaltBlue, GColorWhite);
+  menu_layer_set_highlight_colors(
+    s_menu_layer, C_MENU_HIGHLIGHT, GColorWhite);
   menu_layer_set_click_config_onto_window(s_menu_layer, window);
   layer_add_child(root, menu_layer_get_layer(s_menu_layer));
 
-  // 顶部色彩条纹（叠加在菜单上方）
-  s_menu_bar_layer = layer_create(GRect(0, 0, bounds.size.w, 3));
+  s_menu_bar_layer =
+    layer_create(GRect(0, 0, bounds.size.w, THEME_HEADER_HEIGHT));
   layer_set_update_proc(s_menu_bar_layer, menu_bar_draw);
   layer_add_child(root, s_menu_bar_layer);
 }
@@ -2263,6 +3005,247 @@ static void show_chat_list(void) {
     });
   }
   window_stack_push(s_list_window, true);
+}
+
+static uint16_t notes_menu_rows(MenuLayer *menu, uint16_t section, void *ctx) {
+  return s_note_count > 0 ? s_note_count : 1;
+}
+
+static void notes_menu_draw(GContext *ctx, const Layer *cell_layer,
+                            MenuIndex *idx, void *data) {
+  GRect b = layer_get_bounds(cell_layer);
+  MenuLayer *menu = (MenuLayer *)data;
+  MenuIndex selected = menu_layer_get_selected_index(menu);
+  bool highlighted =
+    selected.row == idx->row && selected.section == idx->section;
+  if (highlighted) {
+    graphics_context_set_fill_color(ctx, C_MENU_HIGHLIGHT);
+    graphics_fill_rect(ctx, b, 0, GCornerNone);
+  }
+  if (s_note_count == 0) {
+    graphics_context_set_text_color(ctx,
+      highlighted ? GColorWhite : GColorDarkGray);
+    graphics_draw_text(ctx, "No Items", fonts_get_system_font(FONT_KEY_GOTHIC_18),
+                       b, GTextOverflowModeTrailingEllipsis,
+                       GTextAlignmentCenter, NULL);
+    return;
+  }
+  WatchNoteEntry *note = &s_note_entries[idx->row];
+  int x_pad = PBL_IF_ROUND_ELSE(24, 8);
+  int dot_x = x_pad + 4;
+  graphics_context_set_stroke_color(ctx,
+    highlighted ? GColorWhite : (note->done ? GColorDarkGray : C_DOT_ON));
+  graphics_context_set_fill_color(ctx,
+    highlighted ? GColorWhite : (note->done ? GColorLightGray : C_DOT_ON));
+  if (note->done) {
+    graphics_draw_circle(ctx, GPoint(dot_x, b.size.h / 2), 5);
+  } else {
+    graphics_fill_circle(ctx, GPoint(dot_x, b.size.h / 2), 5);
+  }
+  int text_x = x_pad + 15;
+  graphics_context_set_text_color(ctx,
+    highlighted ? GColorWhite : (note->done ? GColorDarkGray : GColorBlack));
+  graphics_draw_text(ctx, note->title,
+                     fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+                     GRect(text_x, 2, b.size.w - text_x - 6, 22),
+                     GTextOverflowModeTrailingEllipsis,
+                     GTextAlignmentLeft, NULL);
+  graphics_context_set_text_color(ctx,
+    highlighted ? GColorCeleste : (note->done ? GColorDarkGray : C_ACCENT));
+  graphics_draw_text(ctx, note->due[0] ? note->due :
+                     (note->event ? "Event" :
+                      (note->todo ? "TODO" : "Note")),
+                     fonts_get_system_font(FONT_KEY_GOTHIC_14),
+                     GRect(text_x, 21, b.size.w - text_x - 6, 20),
+                     GTextOverflowModeTrailingEllipsis,
+                     GTextAlignmentLeft, NULL);
+}
+
+static uint16_t note_action_rows(MenuLayer *menu, uint16_t section, void *ctx) {
+  return 3;
+}
+
+static void note_action_draw(GContext *ctx, const Layer *cell_layer,
+                             MenuIndex *idx, void *data) {
+  MenuLayer *menu = (MenuLayer *)data;
+  MenuIndex selected = menu_layer_get_selected_index(menu);
+  bool highlighted =
+    selected.row == idx->row && selected.section == idx->section;
+  GRect bounds = layer_get_bounds(cell_layer);
+  if (highlighted) {
+    graphics_context_set_fill_color(ctx, C_MENU_HIGHLIGHT);
+    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  }
+  bool done = s_selected_note_index >= 0 &&
+    s_selected_note_index < s_note_count &&
+    s_note_entries[s_selected_note_index].done;
+  const char *label = idx->row == 0 ? "Open Conversation" :
+    (idx->row == 1 ? (done ? "Reopen" : "Complete") : "Delete");
+  graphics_context_set_text_color(ctx,
+    highlighted ? GColorWhite : (idx->row == 2 ? GColorRed : C_ACCENT));
+  graphics_draw_text(ctx, label,
+                     fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+                     GRect(8, bounds.size.h / 2 - 12,
+                           bounds.size.w - 16, 24),
+                     GTextOverflowModeTrailingEllipsis,
+                     GTextAlignmentCenter, NULL);
+}
+
+static void send_queued_note_command(void *data) {
+  s_note_command_timer = NULL;
+  if (!s_pending_note_command[0] &&
+      persist_exists(PERSIST_KEY_NOTE_COMMAND)) {
+    persist_read_string(PERSIST_KEY_NOTE_COMMAND, s_pending_note_command,
+                        sizeof(s_pending_note_command));
+  }
+  if (!s_pending_note_command[0]) return;
+  DictionaryIterator *iter;
+  if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
+    dict_write_cstring(iter, MESSAGE_KEY_NOTE_COMMAND,
+                       s_pending_note_command);
+    if (app_message_outbox_send() == APP_MSG_OK) return;
+  }
+  s_note_command_timer =
+    app_timer_register(1500, send_queued_note_command, NULL);
+}
+
+static void queue_note_command(const char *command) {
+  if (s_selected_note_index < 0 ||
+      s_selected_note_index >= s_note_count) return;
+  snprintf(s_pending_note_command, sizeof(s_pending_note_command), "%s|%s",
+           command,
+           s_note_entries[s_selected_note_index].id);
+  persist_write_string(PERSIST_KEY_NOTE_COMMAND, s_pending_note_command);
+  // Menu 回调只写本机持久存储。等窗口动画、按键派发和绘制全部空闲后再通信。
+  if (s_note_command_timer) app_timer_cancel(s_note_command_timer);
+  s_note_command_timer =
+    app_timer_register(900, send_queued_note_command, NULL);
+}
+
+static void note_action_select(MenuLayer *menu, MenuIndex *idx, void *ctx) {
+  if (idx->row == 0) {
+    queue_note_command("open");
+    // 连弹两层回主界面。
+    app_timer_register(10, delayed_pop_twice_first, NULL);
+  } else if (idx->row == 1) {
+    bool done = s_selected_note_index >= 0 &&
+      s_selected_note_index < s_note_count &&
+      s_note_entries[s_selected_note_index].done;
+    queue_note_command(done ? "reopen" : "complete");
+    // Notes 列表只接受手机端回传的完整快照，不在此回调中修改底层 MenuLayer。
+    app_timer_register(10, delayed_pop_timer, NULL);
+  } else {
+    queue_note_command("delete");
+    app_timer_register(10, delayed_pop_timer, NULL);
+  }
+}
+
+static void note_actions_load(Window *window) {
+  s_note_actions_visible = true;
+  Layer *root = window_get_root_layer(window);
+  GRect b = layer_get_bounds(root);
+  window_set_background_color(window, C_BG);
+  s_note_actions_menu_layer =
+    menu_layer_create(GRect(0, THEME_HEADER_HEIGHT, b.size.w,
+                            b.size.h - THEME_HEADER_HEIGHT));
+  menu_layer_set_callbacks(s_note_actions_menu_layer,
+      s_note_actions_menu_layer,
+      (MenuLayerCallbacks){
+        .get_num_rows = note_action_rows,
+        .draw_row = note_action_draw,
+        .select_click = note_action_select,
+      });
+  menu_layer_set_normal_colors(
+    s_note_actions_menu_layer, C_BG, C_TEXT_LIGHT);
+  menu_layer_set_highlight_colors(
+    s_note_actions_menu_layer, C_MENU_HIGHLIGHT, GColorWhite);
+  menu_layer_set_click_config_onto_window(s_note_actions_menu_layer, window);
+  layer_add_child(root, menu_layer_get_layer(s_note_actions_menu_layer));
+  s_note_actions_bar_layer =
+    layer_create(GRect(0, 0, b.size.w, THEME_HEADER_HEIGHT));
+  layer_set_update_proc(s_note_actions_bar_layer, note_actions_bar_draw);
+  layer_add_child(root, s_note_actions_bar_layer);
+}
+
+static void note_actions_unload(Window *window) {
+  s_note_actions_visible = false;
+  if (s_note_actions_bar_layer) {
+    layer_destroy(s_note_actions_bar_layer);
+    s_note_actions_bar_layer = NULL;
+  }
+  menu_layer_destroy(s_note_actions_menu_layer);
+  s_note_actions_menu_layer = NULL;
+}
+
+static void notes_window_appear(Window *window) {
+  if (s_notes_menu_layer && s_notes_list_dirty) {
+    MenuIndex selection = menu_layer_get_selected_index(s_notes_menu_layer);
+    uint16_t rows = s_note_count > 0 ? s_note_count : 1;
+    menu_layer_reload_data(s_notes_menu_layer);
+    selection.section = 0;
+    if (selection.row >= rows) selection.row = rows - 1;
+    menu_layer_set_selected_index(s_notes_menu_layer, selection,
+                                  MenuRowAlignNone, false);
+    s_notes_list_dirty = false;
+  }
+}
+
+static void notes_select(MenuLayer *menu, MenuIndex *idx, void *ctx) {
+  if (s_note_count == 0) return;
+  s_selected_note_index = idx->row;
+  if (!s_note_actions_window) {
+    s_note_actions_window = window_create();
+    window_set_window_handlers(s_note_actions_window, (WindowHandlers){
+      .load = note_actions_load,
+      .unload = note_actions_unload,
+    });
+  }
+  window_stack_push(s_note_actions_window, true);
+}
+
+static void notes_window_load(Window *window) {
+  Layer *root = window_get_root_layer(window);
+  GRect b = layer_get_bounds(root);
+  window_set_background_color(window, C_BG);
+  s_notes_menu_layer =
+    menu_layer_create(GRect(0, THEME_HEADER_HEIGHT, b.size.w,
+                            b.size.h - THEME_HEADER_HEIGHT));
+  menu_layer_set_callbacks(s_notes_menu_layer, s_notes_menu_layer,
+      (MenuLayerCallbacks){
+    .get_num_rows = notes_menu_rows,
+    .draw_row = notes_menu_draw,
+    .select_click = notes_select,
+  });
+  menu_layer_set_normal_colors(s_notes_menu_layer, C_BG, C_TEXT_LIGHT);
+  menu_layer_set_highlight_colors(
+    s_notes_menu_layer, C_MENU_HIGHLIGHT, GColorWhite);
+  menu_layer_set_click_config_onto_window(s_notes_menu_layer, window);
+  layer_add_child(root, menu_layer_get_layer(s_notes_menu_layer));
+  s_notes_bar_layer =
+    layer_create(GRect(0, 0, b.size.w, THEME_HEADER_HEIGHT));
+  layer_set_update_proc(s_notes_bar_layer, notes_bar_draw);
+  layer_add_child(root, s_notes_bar_layer);
+}
+
+static void notes_window_unload(Window *window) {
+  if (s_notes_bar_layer) {
+    layer_destroy(s_notes_bar_layer);
+    s_notes_bar_layer = NULL;
+  }
+  menu_layer_destroy(s_notes_menu_layer);
+  s_notes_menu_layer = NULL;
+}
+
+static void show_notes(void) {
+  if (!s_notes_window) {
+    s_notes_window = window_create();
+    window_set_window_handlers(s_notes_window, (WindowHandlers){
+      .load = notes_window_load,
+      .unload = notes_window_unload,
+      .appear = notes_window_appear,
+    });
+  }
+  window_stack_push(s_notes_window, true);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2342,7 +3325,8 @@ static void model_window_load(Window *window) {
     .select_click = model_menu_select,
   });
   menu_layer_set_normal_colors(s_model_menu_layer, C_BG, C_TEXT_LIGHT);
-  menu_layer_set_highlight_colors(s_model_menu_layer, GColorCobaltBlue, GColorWhite);
+  menu_layer_set_highlight_colors(
+    s_model_menu_layer, C_MENU_HIGHLIGHT, GColorWhite);
   menu_layer_set_click_config_onto_window(s_model_menu_layer, window);
   layer_add_child(root, menu_layer_get_layer(s_model_menu_layer));
 }
@@ -2363,7 +3347,7 @@ static void show_model_select(void) {
   window_stack_push(s_model_window, true);
 }
 
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
 // ═══════════════════════════════════════════════════════════════════════════════
 // TTS 音量选择子窗口 (MenuLayer)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2431,7 +3415,8 @@ static void volume_window_load(Window *window) {
     .select_click = volume_menu_select,
   });
   menu_layer_set_normal_colors(s_volume_menu_layer, C_BG, C_TEXT_LIGHT);
-  menu_layer_set_highlight_colors(s_volume_menu_layer, GColorCobaltBlue, GColorWhite);
+  menu_layer_set_highlight_colors(
+    s_volume_menu_layer, C_MENU_HIGHLIGHT, GColorWhite);
   menu_layer_set_click_config_onto_window(s_volume_menu_layer, window);
   layer_add_child(root, menu_layer_get_layer(s_volume_menu_layer));
 
@@ -2492,6 +3477,43 @@ static void parse_chat_list(const char *data) {
   }
 }
 
+static void copy_note_field(char *dest, size_t size,
+                            const char *start, const char *end) {
+  size_t len = end > start ? (size_t)(end - start) : 0;
+  if (len >= size) len = size - 1;
+  memcpy(dest, start, len);
+  dest[len] = '\0';
+}
+
+static void parse_note_list(const char *data) {
+  s_note_count = 0;
+  if (!s_note_entries) {
+    s_note_entries = calloc(MAX_WATCH_NOTES, sizeof(WatchNoteEntry));
+    if (!s_note_entries) return;
+  }
+  const char *line = data;
+  while (*line && s_note_count < MAX_WATCH_NOTES) {
+    const char *end = strchr(line, '\n');
+    if (!end) end = line + strlen(line);
+    const char *p1 = strchr(line, '|');
+    if (!p1 || p1 >= end) break;
+    const char *p2 = strchr(p1 + 1, '|');
+    if (!p2 || p2 >= end) break;
+    const char *p3 = strchr(p2 + 1, '|');
+    if (!p3 || p3 >= end) break;
+    const char *p4 = strchr(p3 + 1, '|');
+    if (!p4 || p4 >= end) break;
+    WatchNoteEntry *note = &s_note_entries[s_note_count++];
+    copy_note_field(note->id, sizeof(note->id), line, p1);
+    note->done = p1[1] == '1';
+    note->todo = p2[1] == 'T';
+    note->event = p2[1] == 'E';
+    copy_note_field(note->due, sizeof(note->due), p3 + 1, p4);
+    copy_note_field(note->title, sizeof(note->title), p4 + 1, end);
+    line = *end ? end + 1 : end;
+  }
+}
+
 // 解析手机发来的模型列表 "idx|model1\nmodel2\nmodel3"
 static void parse_model_list(const char *data) {
   s_model_count = 0;
@@ -2544,6 +3566,78 @@ static void parse_model_list(const char *data) {
 static void init(void) {
   // C12 fix: srand 已在 window_load 中调用，此处移除重复调用
 
+  s_note_entries = calloc(MAX_WATCH_NOTES, sizeof(WatchNoteEntry));
+  s_note_wakeups = calloc(MAX_NOTE_WAKEUPS, sizeof(NoteWakeupSlot));
+  if (s_note_wakeups) {
+    for (int i = 0; i < MAX_NOTE_WAKEUPS; i++) {
+      int key = PERSIST_NOTE_WAKEUP_BASE + i;
+      if (persist_exists(key) &&
+          persist_get_size(key) == (int)sizeof(NoteWakeupSlot))
+        persist_read_data(key, &s_note_wakeups[i], sizeof(NoteWakeupSlot));
+    }
+  }
+  // v1.4.2 早期版本曾允许第 8 个 Note Wakeup。该槽现预留给同步；
+  // 升级时取消遗留闹钟，避免一个不可管理的旧提醒继续占用 OS 资源。
+  if (persist_exists(PERSIST_NOTE_WAKEUP_BASE + MAX_NOTE_WAKEUPS) &&
+      persist_get_size(PERSIST_NOTE_WAKEUP_BASE + MAX_NOTE_WAKEUPS) ==
+        (int)sizeof(NoteWakeupSlot)) {
+    NoteWakeupSlot legacy_slot;
+    persist_read_data(PERSIST_NOTE_WAKEUP_BASE + MAX_NOTE_WAKEUPS,
+                      &legacy_slot, sizeof(legacy_slot));
+    if (legacy_slot.wakeup_id >= 0) wakeup_cancel(legacy_slot.wakeup_id);
+    persist_delete(PERSIST_NOTE_WAKEUP_BASE + MAX_NOTE_WAKEUPS);
+  }
+  if (persist_exists(PERSIST_SYNC_WAKEUP_ID))
+    s_sync_wakeup_id = (WakeupId)persist_read_int(PERSIST_SYNC_WAKEUP_ID);
+  wakeup_service_subscribe(note_wakeup_handler);
+
+  s_launch_reason = launch_reason();
+  s_launch_args = launch_get_args();
+  const char *reason_name = "system";
+  switch (s_launch_reason) {
+    case APP_LAUNCH_USER: reason_name = "user"; break;
+    case APP_LAUNCH_PHONE: reason_name = "phone"; break;
+    case APP_LAUNCH_WAKEUP: reason_name = "wakeup"; break;
+    case APP_LAUNCH_WORKER: reason_name = "worker"; break;
+    case APP_LAUNCH_QUICK_LAUNCH: reason_name = "quick_launch"; break;
+    case APP_LAUNCH_TIMELINE_ACTION:
+      reason_name = "timeline_action";
+      s_force_launch_dictation = true;
+      break;
+    case APP_LAUNCH_SMARTSTRAP: reason_name = "smartstrap"; break;
+    default: break;
+  }
+  // Auto Dictation is a one-shot convenience for deliberate fast entries
+  // (Quick Launch shortcut or a Timeline action). A normal open from the app
+  // menu/list must not grab the microphone.
+  s_quick_launch_entry = (s_launch_reason == APP_LAUNCH_QUICK_LAUNCH ||
+                          s_launch_reason == APP_LAUNCH_TIMELINE_ACTION);
+  APP_LOG(APP_LOG_LEVEL_INFO,
+          "Launch: reason=%s quick_entry=%d force_dict=%d auto_dict(persist)=%d",
+          reason_name, (int)s_quick_launch_entry,
+          (int)s_force_launch_dictation,
+          (int)(persist_exists(PERSIST_KEY_AUTO_DICTATION) ?
+                persist_read_int(PERSIST_KEY_AUTO_DICTATION) : 0));
+  snprintf(s_launch_context, sizeof(s_launch_context), "%s|%lu",
+           reason_name, (unsigned long)s_launch_args);
+  if (s_launch_reason == APP_LAUNCH_WAKEUP) {
+    WakeupId launch_wakeup_id;
+    int32_t launch_cookie;
+    if (wakeup_get_launch_event(&launch_wakeup_id, &launch_cookie)) {
+      s_launch_args = (uint32_t)launch_cookie;
+      snprintf(s_launch_context, sizeof(s_launch_context), "wakeup|%lu",
+               (unsigned long)s_launch_args);
+      if (launch_cookie == SYNC_WAKEUP_COOKIE) {
+        s_sync_wakeup_launch = true;
+        utf8_safe_copy(s_sync_status, sizeof(s_sync_status), "Syncing...");
+        s_sync_wakeup_id = -1;
+        persist_delete(PERSIST_SYNC_WAKEUP_ID);
+      } else {
+        note_wakeup_alert(launch_cookie);
+      }
+    }
+  }
+
   // 注册 AppMessage 回调
   app_message_register_inbox_received(inbox_received);
   app_message_register_inbox_dropped(inbox_dropped);
@@ -2551,6 +3645,17 @@ static void init(void) {
   app_message_register_outbox_failed(outbox_failed);
   // 使用最大缓冲区（Basalt: inbox 8200 / outbox 2048）
   app_message_open(app_message_inbox_size_maximum(), app_message_outbox_size_maximum());
+  app_timer_register(2500, clear_startup_message_guard, NULL);
+  if (persist_exists(PERSIST_KEY_NOTE_COMMAND)) {
+    // Older 1.4.2 test builds could leave a pending Note command in watch
+    // persistent storage after a crash/retry. Replaying it during app startup
+    // is unsafe on real watches because the phone JS side may not be ready yet,
+    // and it can also repeat stale destructive actions. Local note state has
+    // already been updated on the watch, so drop the stale command and wait for
+    // the phone to resend NOTE_LIST during the normal ready handshake.
+    persist_delete(PERSIST_KEY_NOTE_COMMAND);
+    s_pending_note_command[0] = '\0';
+  }
 
   // 初始化模型显示名
   s_current_model_display[0] = '\0';
@@ -2568,8 +3673,28 @@ static void init(void) {
 static void deinit(void) {
   stop_anim();
   if (s_thinking_timeout) app_timer_cancel(s_thinking_timeout);
+  if (s_auto_dictation_timer) app_timer_cancel(s_auto_dictation_timer);
+  if (s_dictation_retry_timer) app_timer_cancel(s_dictation_retry_timer);
+  if (s_note_command_timer) app_timer_cancel(s_note_command_timer);
+  if (s_sync_wakeup_timer) app_timer_cancel(s_sync_wakeup_timer);
   if (s_dictation_session) dictation_session_destroy(s_dictation_session);
-#if defined(PBL_PLATFORM_EMERY)
+  if (s_pending_question) {
+    free(s_pending_question);
+    s_pending_question = NULL;
+  }
+  if (s_note_entries) {
+    free(s_note_entries);
+    s_note_entries = NULL;
+  }
+  if (s_note_wakeups) {
+    free(s_note_wakeups);
+    s_note_wakeups = NULL;
+  }
+  if (s_health_data) {
+    free(s_health_data);
+    s_health_data = NULL;
+  }
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
   tts_stop();
 #endif
 
@@ -2578,7 +3703,15 @@ static void deinit(void) {
     window_stack_remove(s_model_window, false);
     window_destroy(s_model_window);
   }
-#if defined(PBL_PLATFORM_EMERY)
+  if (s_note_actions_window) {
+    window_stack_remove(s_note_actions_window, false);
+    window_destroy(s_note_actions_window);
+  }
+  if (s_notes_window) {
+    window_stack_remove(s_notes_window, false);
+    window_destroy(s_notes_window);
+  }
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
   if (s_volume_window) {
     window_stack_remove(s_volume_window, false);
     window_destroy(s_volume_window);
