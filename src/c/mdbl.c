@@ -626,6 +626,32 @@ static void note_wakeup_handler(WakeupId wakeup_id, int32_t cookie) {
   note_wakeup_alert(cookie);
 }
 
+// Flint's bundled newlib strtol can fault while loading its locale state.
+// AppMessage control fields are bounded base-10 int32 values, so parse them
+// locally and reject malformed/overflowing input instead of entering libc.
+static bool parse_decimal_int32(const char *text, int32_t *result) {
+  if (!text || !result) return false;
+  bool negative = false;
+  if (*text == '-') {
+    negative = true;
+    text++;
+  } else if (*text == '+') {
+    text++;
+  }
+  if (*text < '0' || *text > '9') return false;
+
+  int64_t value = 0;
+  while (*text >= '0' && *text <= '9') {
+    value = value * 10 + (*text - '0');
+    if ((!negative && value > INT32_MAX) ||
+        (negative && value > (int64_t)INT32_MAX + 1)) return false;
+    text++;
+  }
+  if (*text != '\0') return false;
+  *result = negative ? (int32_t)-value : (int32_t)value;
+  return true;
+}
+
 static void apply_sync_wakeup(void *data) {
   (void)data;
   s_sync_wakeup_timer = NULL;
@@ -663,7 +689,9 @@ static void apply_sync_wakeup(void *data) {
 
 static void schedule_sync_wakeup(const char *data) {
   if (!data) return;
-  s_pending_sync_wakeup_timestamp = strtol(data, NULL, 10);
+  int32_t timestamp = 0;
+  if (!parse_decimal_int32(data, &timestamp)) return;
+  s_pending_sync_wakeup_timestamp = timestamp;
   if (s_sync_wakeup_timer) app_timer_cancel(s_sync_wakeup_timer);
   // Do not call Wakeup scheduling APIs from inside AppMessage's inbox
   // callback. On real watches this path could terminate the app immediately
@@ -679,7 +707,8 @@ static void clear_startup_message_guard(void *data) {
 static void schedule_note_wakeup(const char *data) {
   if (!data || !s_note_wakeups) return;
   if (strncmp(data, "cancel|", 7) == 0) {
-    int32_t cancel_code = (int32_t)strtol(data + 7, NULL, 10);
+    int32_t cancel_code = 0;
+    if (!parse_decimal_int32(data + 7, &cancel_code)) return;
     for (int i = 0; i < MAX_NOTE_WAKEUPS; i++) {
       if (s_note_wakeups[i].code == cancel_code) {
         if (s_note_wakeups[i].wakeup_id >= 0)
@@ -703,8 +732,11 @@ static void schedule_note_wakeup(const char *data) {
   char *p3 = strchr(p2, '|');
   if (!p3) return;
   *p3++ = '\0';
-  int32_t code = (int32_t)strtol(copy, NULL, 10);
-  time_t timestamp = (time_t)strtol(p1, NULL, 10);
+  int32_t code = 0;
+  int32_t timestamp_value = 0;
+  if (!parse_decimal_int32(copy, &code) ||
+      !parse_decimal_int32(p1, &timestamp_value)) return;
+  time_t timestamp = (time_t)timestamp_value;
   if (timestamp <= time(NULL) + 30) return;
 
   int slot = -1;
@@ -3530,7 +3562,9 @@ static void parse_model_list(const char *data) {
   if (idx_len >= (int)sizeof(idx_buf)) idx_len = sizeof(idx_buf) - 1;
   memcpy(idx_buf, data, idx_len);
   idx_buf[idx_len] = '\0';
-  s_current_model_index = atoi(idx_buf);
+  int32_t model_index = 0;
+  if (parse_decimal_int32(idx_buf, &model_index))
+    s_current_model_index = (int)model_index;
 
   // 解析模型名列表
   const char *p = bar + 1;
