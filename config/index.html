@@ -227,7 +227,7 @@
     </div>
   </header>
   <div class="release-notice">
-    v1.4.2 adds exact Sleep intervals, Notes and TODOs, strong local reminders,
+    v1.4.2 adds exact Sleep intervals, ToDo & Notes, strong local reminders,
     launch-aware Timeline, long-term Memory, and Simplified Chinese normalization.
     Install the v1.4.2 watch app before relying on these features.
   </div>
@@ -376,7 +376,7 @@
   </details>
 
   <details class="section-card">
-    <summary><h2>Todoist sync</h2><span class="section-kicker">Two-way Notes and Timeline synchronization</span></summary>
+    <summary><h2>Todoist sync</h2><span class="section-kicker">Two-way ToDo & Notes and Timeline synchronization</span></summary>
     <div class="section-body">
       <div class="toggle-row">
         <span class="toggle-label">Enable Todoist Sync <span class="beta-badge">Beta</span></span>
@@ -442,7 +442,7 @@
   </details>
 
   <details class="section-card">
-    <summary><h2>Notes and TODOs</h2><span class="section-kicker">Edit, complete or delete local items</span></summary>
+    <summary><h2>ToDo & Notes</h2><span class="section-kicker">Edit, complete or delete local items</span></summary>
     <div class="section-body"><div id="note_config_list"></div></div>
   </details>
 
@@ -845,12 +845,12 @@
       }
     });
 
-    // ── Notes / TODO 管理 ────────────────────────────────────────────
+    // ── ToDo & Notes 管理 ────────────────────────────────────────────
     var noteConfigList = document.getElementById('note_config_list');
 
     function renderConfigNotes() {
       if (configNotes.length === 0) {
-        noteConfigList.innerHTML = '<div class="empty">No Notes or TODOs yet</div>';
+        noteConfigList.innerHTML = '<div class="empty">No ToDo & Notes yet</div>';
         return;
       }
       configNotes.sort(function(a, b) {
@@ -864,9 +864,11 @@
         html += '<div class="note-config-item' + (done ? ' done' : '') +
           '" data-note-id="' + escapeHtml(note.id) + '">' +
           '<div class="note-config-meta">' +
-          (note.type === 'todo' ? 'TODO' : 'NOTE') +
+          (note.type === 'todo' ? 'TODO' :
+            (note.type === 'event' ? 'EVENT' : 'NOTE')) +
           (note.due ? ' · ' + escapeHtml(String(note.due).substring(0, 16).replace('T', ' ')) : '') +
           (done ? ' · COMPLETED' : ' · OPEN') +
+          (note.timeline_pin_id ? ' · TIMELINE' : '') +
           (note.todoist_task_id ? ' · TODOIST' : '') + '</div>' +
           '<input class="note-title-input" data-field="title" maxlength="80" value="' +
           escapeHtml(note.title || '') + '">' +
