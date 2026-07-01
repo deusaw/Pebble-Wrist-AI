@@ -180,6 +180,36 @@
     .beta-badge { display: inline-block; font-size: 9px; color: #fff; background: var(--purple); padding: 2px 6px; border-radius: 999px; margin-left: 5px; vertical-align: middle; }
     .beta-hint { font-size: 11px; color: #95601d; margin-top: 5px; }
     .subgroup { padding-top: 14px; margin-top: 14px; border-top: 1px solid var(--line); }
+    .theme-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .theme-choice {
+      min-height: 52px; padding: 7px 4px; border: 2px solid transparent;
+      border-radius: 10px; background: #fffdfa; color: var(--ink);
+      font-size: 10px; text-align: center; cursor: pointer;
+    }
+    .theme-choice::before {
+      content: ""; display: block; width: 24px; height: 24px;
+      margin: 0 auto 4px; border-radius: 50%; background: var(--swatch);
+      box-shadow: inset 0 0 0 1px rgba(0,0,0,.12);
+    }
+    .theme-choice[data-theme="-1"]::before {
+      background: linear-gradient(135deg, #e66d22, #7150a6 45%, #0047ab 72%, #555);
+    }
+    .theme-choice.active {
+      border-color: var(--orange); background: #fff3df; font-weight: 700;
+    }
+    .note-config-item {
+      margin-bottom: 10px; padding: 11px; border: 1px solid #e4dad1;
+      border-radius: 11px; background: #fffdfa;
+    }
+    .note-config-item.done { opacity: .68; }
+    .note-config-meta { margin: 0 0 8px; color: var(--muted); font-size: 10px; }
+    .note-config-item textarea { min-height: 64px; margin-top: 7px; }
+    .note-config-actions { display: flex; gap: 7px; margin-top: 8px; }
+    .note-config-actions button {
+      flex: 1; padding: 8px; border: 0; border-radius: 8px;
+      color: #fff; background: var(--purple); font-weight: 650;
+    }
+    .note-config-actions .note-delete { background: var(--danger); }
     @media (max-width: 390px) {
       body { padding-left: 10px; padding-right: 10px; }
       .chat-item { align-items: flex-start; }
@@ -278,6 +308,20 @@
         </div>
       </div>
       <div class="field">
+        <label>Wrist AI Theme</label>
+        <div class="theme-grid" id="theme_grid">
+          <button type="button" class="theme-choice" data-theme="-1">Random</button>
+          <button type="button" class="theme-choice" data-theme="0" style="--swatch:#e66d22">Orange</button>
+          <button type="button" class="theme-choice" data-theme="1" style="--swatch:#7b2cbf">Violet</button>
+          <button type="button" class="theme-choice" data-theme="2" style="--swatch:#6a4cbd">Indigo</button>
+          <button type="button" class="theme-choice" data-theme="3" style="--swatch:#0047ab">Cobalt</button>
+          <button type="button" class="theme-choice" data-theme="4" style="--swatch:#002147">Oxford</button>
+          <button type="button" class="theme-choice" data-theme="5" style="--swatch:#9b111e">Red</button>
+          <button type="button" class="theme-choice" data-theme="6" style="--swatch:#555">Deep Gray</button>
+        </div>
+        <div class="hint">Random chooses a theme each time Wrist AI opens. A color choice stays fixed for Home, headers and menu selection.</div>
+      </div>
+      <div class="field">
         <div class="toggle-row">
           <span class="toggle-label">Start Listening on Launch</span>
           <label class="toggle-switch"><input type="checkbox" id="auto_dictation"><span class="toggle-slider"></span></label>
@@ -362,6 +406,11 @@
   </details>
 
   <details class="section-card">
+    <summary><h2>Notes and TODOs</h2><span class="section-kicker">Edit, complete or delete local items</span></summary>
+    <div class="section-body"><div id="note_config_list"></div></div>
+  </details>
+
+  <details class="section-card">
     <summary><h2>Conversations</h2><span class="section-kicker">Switch, export or remove local chats</span></summary>
     <div class="section-body"><ul class="chat-list" id="chat_list"></ul></div>
   </details>
@@ -380,6 +429,13 @@
     function getParam(name) {
       var m = window.location.search.match(new RegExp('[?&]' + name + '=([^&]*)'));
       return m ? decodeURIComponent(m[1]) : '';
+    }
+
+    function escapeHtml(value) {
+      return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     }
 
     function encodeUtf8Bytes(text) {
@@ -508,6 +564,18 @@
     var healthDays = getParam('health_days') || '7';
     var healthSleep = getParam('health_sleep') !== '0';
     var timelineEnabled = getParam('timeline_enabled') === '1';
+    var themeColor = parseInt(getParam('theme_color') || '-1', 10);
+    if (isNaN(themeColor) || themeColor < -1 || themeColor > 6) themeColor = -1;
+
+    // Notes are carried in the URL hash alongside conversation export data.
+    var configNotes = [];
+    var pendingNoteDeletes = [];
+    var dirtyNoteIds = {};
+    try {
+      var notesMatch = window.location.hash.match(new RegExp('(?:^|&)notes_data=([^&]*)'));
+      if (notesMatch) configNotes = JSON.parse(decodeURIComponent(notesMatch[1])) || [];
+    } catch (noteParseError) {}
+    if (!Array.isArray(configNotes)) configNotes = [];
 
     function applyApiMode(mode) {
       apiMode = mode;
@@ -571,6 +639,22 @@
     document.getElementById('health_days').value = healthDays;
     document.getElementById('health_sleep').checked = healthSleep;
     document.getElementById('timeline_enabled').checked = timelineEnabled;
+
+    function renderThemeChoices() {
+      var choices = document.querySelectorAll('.theme-choice');
+      for (var ti = 0; ti < choices.length; ti++) {
+        choices[ti].className = 'theme-choice' +
+          (parseInt(choices[ti].getAttribute('data-theme'), 10) === themeColor ?
+            ' active' : '');
+      }
+    }
+    document.getElementById('theme_grid').addEventListener('click', function(e) {
+      var button = e.target;
+      if (!button.classList.contains('theme-choice')) return;
+      themeColor = parseInt(button.getAttribute('data-theme'), 10);
+      renderThemeChoices();
+    });
+    renderThemeChoices();
 
     // TTS key 状态
     var hasTtsKey = getParam('has_tts_key') === '1';
@@ -665,6 +749,85 @@
       }
     });
 
+    // ── Notes / TODO 管理 ────────────────────────────────────────────
+    var noteConfigList = document.getElementById('note_config_list');
+
+    function renderConfigNotes() {
+      if (configNotes.length === 0) {
+        noteConfigList.innerHTML = '<div class="empty">No Notes or TODOs yet</div>';
+        return;
+      }
+      configNotes.sort(function(a, b) {
+        if (a.status !== b.status) return a.status === 'open' ? -1 : 1;
+        return (b.updated || b.created || 0) - (a.updated || a.created || 0);
+      });
+      var html = '';
+      for (var ni = 0; ni < configNotes.length; ni++) {
+        var note = configNotes[ni];
+        var done = note.status === 'done';
+        html += '<div class="note-config-item' + (done ? ' done' : '') +
+          '" data-note-id="' + escapeHtml(note.id) + '">' +
+          '<div class="note-config-meta">' +
+          (note.type === 'todo' ? 'TODO' : 'NOTE') +
+          (note.due ? ' · ' + escapeHtml(String(note.due).substring(0, 16).replace('T', ' ')) : '') +
+          (done ? ' · COMPLETED' : ' · OPEN') + '</div>' +
+          '<input class="note-title-input" data-field="title" maxlength="80" value="' +
+          escapeHtml(note.title || '') + '">' +
+          '<textarea class="note-content-input" data-field="content" maxlength="1000" placeholder="Details">' +
+          escapeHtml(note.content || '') + '</textarea>' +
+          '<div class="note-config-actions">' +
+          '<button type="button" class="note-toggle">' +
+          (done ? 'Reopen' : 'Complete') + '</button>' +
+          '<button type="button" class="note-delete">Delete</button>' +
+          '</div></div>';
+      }
+      noteConfigList.innerHTML = html;
+    }
+
+    function findConfigNote(id) {
+      for (var ni = 0; ni < configNotes.length; ni++)
+        if (configNotes[ni].id === id) return configNotes[ni];
+      return null;
+    }
+
+    noteConfigList.addEventListener('input', function(e) {
+      var item = e.target;
+      var wrap = item.parentElement;
+      while (wrap && !wrap.getAttribute('data-note-id')) wrap = wrap.parentElement;
+      if (!wrap) return;
+      var id = wrap.getAttribute('data-note-id');
+      var note = findConfigNote(id);
+      var field = item.getAttribute('data-field');
+      if (!note || (field !== 'title' && field !== 'content')) return;
+      note[field] = item.value;
+      note.updated = Date.now();
+      dirtyNoteIds[id] = true;
+    });
+
+    noteConfigList.addEventListener('click', function(e) {
+      var button = e.target;
+      if (!button.classList.contains('note-toggle') &&
+          !button.classList.contains('note-delete')) return;
+      var wrap = button.parentElement;
+      while (wrap && !wrap.getAttribute('data-note-id')) wrap = wrap.parentElement;
+      if (!wrap) return;
+      var id = wrap.getAttribute('data-note-id');
+      var note = findConfigNote(id);
+      if (!note) return;
+      if (button.classList.contains('note-delete')) {
+        pendingNoteDeletes.push(id);
+        configNotes = configNotes.filter(function(n) { return n.id !== id; });
+        delete dirtyNoteIds[id];
+      } else {
+        note.status = note.status === 'done' ? 'open' : 'done';
+        note.updated = Date.now();
+        dirtyNoteIds[id] = true;
+      }
+      renderConfigNotes();
+    });
+
+    renderConfigNotes();
+
     // ── 对话列表 ──────────────────────────────────────────────────────
     var listEl = document.getElementById('chat_list');
     var pendingDeletes = [];
@@ -718,8 +881,23 @@
         health_sleep: document.getElementById('health_sleep').checked ? 1 : 0,
         tts_rate: document.getElementById('tts_rate').value,
         duo_tts_enabled: document.getElementById('duo_tts_enabled').checked ? 1 : 0,
-        timeline_enabled: document.getElementById('timeline_enabled').checked ? 1 : 0
+        timeline_enabled: document.getElementById('timeline_enabled').checked ? 1 : 0,
+        theme_color: themeColor
       };
+      var noteUpdates = [];
+      for (var nui = 0; nui < configNotes.length; nui++) {
+        if (dirtyNoteIds[configNotes[nui].id]) {
+          noteUpdates.push({
+            id: configNotes[nui].id,
+            title: configNotes[nui].title,
+            content: configNotes[nui].content,
+            status: configNotes[nui].status
+          });
+        }
+      }
+      if (noteUpdates.length > 0) s.note_updates = noteUpdates;
+      if (pendingNoteDeletes.length > 0)
+        s.deleted_notes = pendingNoteDeletes.slice();
       var key = document.getElementById('api_key').value.trim();
       if (key.length > 0) s.api_key = key;
       var ttsKey = document.getElementById('tts_api_key').value.trim();
