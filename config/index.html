@@ -5,118 +5,207 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Wrist AI Settings</title>
   <style>
+    :root {
+      --paper: #f4efe7;
+      --card: #fffaf3;
+      --ink: #29242f;
+      --muted: #756d78;
+      --line: #ded4ca;
+      --orange: #e66d22;
+      --orange-dark: #b94712;
+      --purple: #7150a6;
+      --purple-soft: #eee6f8;
+      --danger: #a23a32;
+      --success: #377b5c;
+    }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, sans-serif; background: #0a0e1a; color: #ddd; padding: 16px; }
-    h1 { font-size: 22px; text-align: center; padding: 12px 0; color: #fff; }
-    h2 { font-size: 16px; color: #8af; margin: 14px 0 8px; }
-    .field { margin-bottom: 14px; }
-    label { display: block; font-size: 13px; color: #8af; margin-bottom: 4px; }
-    input, textarea { width: 100%; padding: 10px; border: 1px solid #223; border-radius: 6px; background: #111; color: #fff; font-size: 14px; }
-    textarea { min-height: 80px; }
-    .hint { font-size: 11px; color: #556; margin-top: 2px; }
-    .status { font-size: 12px; color: #4c8; margin-top: 4px; }
-    .btn { width: 100%; padding: 12px; border: none; border-radius: 8px; font-size: 15px; color: #fff; cursor: pointer; margin-bottom: 8px; }
-    .btn-primary { background: #0047AB; }
-    .btn-primary:active { background: #0066ff; }
-    .btn-danger { background: #661111; }
-    .btn-danger:active { background: #cc2222; }
-    .btn-secondary { background: #2a4a6b; }
-    .divider { border-top: 1px solid #223; margin: 16px 0; }
+    html { background: var(--paper); }
+    body {
+      max-width: 680px; margin: 0 auto; padding: 0 14px 104px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--paper); color: var(--ink); line-height: 1.4;
+    }
+    .app-header {
+      display: flex; align-items: center; gap: 12px; padding: 20px 4px 14px;
+    }
+    .brand-mark {
+      width: 44px; height: 44px; flex: 0 0 44px; border-radius: 13px;
+      display: flex; align-items: center; justify-content: center;
+      color: #fff; font-size: 21px; font-weight: 800; letter-spacing: -1px;
+      background: linear-gradient(145deg, var(--orange), #ef8c2f 58%, var(--purple));
+      box-shadow: 0 5px 14px rgba(113, 80, 166, .22);
+    }
+    h1 { font-size: 23px; line-height: 1.05; color: var(--ink); }
+    .subtitle { margin-top: 4px; color: var(--muted); font-size: 12px; }
+    h2 { font-size: 15px; color: var(--ink); }
+    .release-notice {
+      margin-bottom: 12px; padding: 11px 12px 11px 14px;
+      border: 1px solid #e4c9a8; border-left: 4px solid var(--orange);
+      border-radius: 12px; background: #fff3df; color: #70401e;
+      font-size: 12px; line-height: 1.45;
+    }
+    .section-card {
+      margin-bottom: 11px; overflow: hidden;
+      border: 1px solid var(--line); border-radius: 15px;
+      background: var(--card); box-shadow: 0 2px 8px rgba(61, 42, 35, .05);
+    }
+    .section-card > summary {
+      position: relative; display: block; padding: 15px 44px 14px 16px;
+      list-style: none; cursor: pointer; user-select: none;
+    }
+    .section-card > summary::-webkit-details-marker { display: none; }
+    .section-card > summary::after {
+      content: "›"; position: absolute; right: 18px; top: 11px;
+      color: var(--purple); font-size: 25px; font-weight: 400;
+      transform: rotate(90deg); transition: transform .18s;
+    }
+    .section-card[open] > summary::after { transform: rotate(-90deg); }
+    .section-card[open] > summary { border-bottom: 1px solid var(--line); }
+    .section-kicker {
+      display: block; margin-top: 3px; color: var(--muted);
+      font-size: 11px; font-weight: 400;
+    }
+    .section-body { padding: 15px; }
+    .field { margin-bottom: 16px; }
+    .field:last-child { margin-bottom: 0; }
+    label {
+      display: block; margin-bottom: 5px;
+      color: #5d426f; font-size: 12px; font-weight: 650;
+    }
+    input, textarea, select {
+      width: 100%; padding: 11px 12px; border: 1px solid #cfc4bb;
+      border-radius: 10px; outline: none; background: #fffdfa;
+      color: var(--ink); font-size: 14px; font-family: inherit;
+    }
+    input:focus, textarea:focus, select:focus {
+      border-color: var(--purple);
+      box-shadow: 0 0 0 3px rgba(113, 80, 166, .11);
+    }
+    textarea { min-height: 112px; resize: vertical; }
+    .hint { margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.45; }
+    .status { margin-top: 5px; color: var(--success); font-size: 12px; }
+    .btn {
+      width: 100%; padding: 12px; margin-bottom: 8px;
+      border: 0; border-radius: 10px; color: #fff; cursor: pointer;
+      font-size: 14px; font-weight: 650; font-family: inherit;
+    }
+    .btn:disabled { cursor: default; }
+    .btn-primary { background: var(--orange); }
+    .btn-primary:active { background: var(--orange-dark); }
+    .btn-danger { background: #fff1ee; color: var(--danger); border: 1px solid #e4b9b4; }
+    .btn-danger:active { background: #f5dcd8; }
+    .save-dock {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+      padding: 10px 14px max(10px, env(safe-area-inset-bottom));
+      background: rgba(244, 239, 231, .96); border-top: 1px solid var(--line);
+    }
+    .save-dock .btn { max-width: 652px; margin: 0 auto; display: block; }
+    .danger-card { border-color: #e4c2bc; }
 
     /* 模型列表样式 */
     .model-input-row { display: flex; gap: 8px; margin-bottom: 10px; }
     .model-input-row input { flex: 1; }
     .model-add-btn {
       width: 44px; min-width: 44px; padding: 10px; border: none; border-radius: 6px;
-      background: #0047AB; color: #fff; font-size: 18px; cursor: pointer;
+      background: var(--orange); color: #fff; font-size: 18px; cursor: pointer;
     }
-    .model-add-btn:active { background: #0066ff; }
+    .model-add-btn:active { background: var(--orange-dark); }
     .model-list { list-style: none; }
 
     /* API 模式切换 */
     .mode-toggle { display: flex; gap: 0; margin-bottom: 10px; border-radius: 6px; overflow: hidden; }
     .mode-btn {
-      flex: 1; padding: 10px; border: 1px solid #223; background: #111; color: #888;
+      flex: 1; padding: 10px; border: 1px solid #d2c6bd; background: #fffdfa; color: var(--muted);
       font-size: 13px; text-align: center; cursor: pointer; transition: all 0.15s;
     }
-    .mode-btn.active { background: #0047AB; color: #fff; border-color: #0047AB; }
+    .mode-btn.active { background: var(--purple); color: #fff; border-color: var(--purple); }
     .mode-btn:first-child { border-radius: 6px 0 0 6px; }
     .mode-btn:last-child { border-radius: 0 6px 6px 0; }
     .custom-url-field { display: none; margin-top: 8px; }
     .model-item {
       display: flex; align-items: center; padding: 10px;
-      background: #111; border-radius: 6px; margin-bottom: 6px;
+      background: #fffdfa; border: 1px solid #e4dad1; border-radius: 9px; margin-bottom: 7px;
       border-left: 3px solid transparent;
     }
-    .model-item.active { border-left-color: #00cccc; background: #0a1a2e; }
+    .model-item.active { border-left-color: var(--orange); background: #fff4e6; }
     .model-info { flex: 1; min-width: 0; }
-    .model-name { font-size: 14px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .model-status { font-size: 11px; color: #556; margin-top: 2px; }
-    .model-status.active-status { color: #00cccc; }
+    .model-name { font-size: 14px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .model-status { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .model-status.active-status { color: var(--orange-dark); }
     .model-actions { display: flex; gap: 6px; margin-left: 8px; }
     .model-btn {
       padding: 4px 8px; border: none; border-radius: 4px; font-size: 11px;
       cursor: pointer; color: #fff;
     }
-    .model-btn-switch { background: #0047AB; }
-    .model-btn-delete { background: #441111; }
+    .model-btn-switch { background: var(--purple); }
+    .model-btn-delete { background: var(--danger); }
 
     /* 对话列表 */
     .chat-list { list-style: none; }
     .chat-item {
       display: flex; align-items: center; padding: 10px;
-      background: #111; border-radius: 6px; margin-bottom: 6px;
+      background: #fffdfa; border: 1px solid #e4dad1; border-radius: 9px; margin-bottom: 7px;
     }
-    .chat-item.active { border-left: 3px solid #00cccc; background: #0a1a2e; }
+    .chat-item.active { border-left: 3px solid var(--orange); background: #fff4e6; }
     .chat-info { flex: 1; min-width: 0; }
-    .chat-title { font-size: 14px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .chat-meta { font-size: 11px; color: #556; margin-top: 2px; }
+    .chat-title { font-size: 14px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .chat-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
     .chat-actions { display: flex; gap: 6px; margin-left: 8px; }
     .chat-btn {
       padding: 4px 8px; border: none; border-radius: 4px; font-size: 11px;
       cursor: pointer; color: #fff;
     }
-    .chat-btn-switch { background: #0047AB; }
-    .chat-btn-delete { background: #441111; }
-    .chat-btn-export { background: #2a5a3a; }
-    .empty { color: #556; font-size: 13px; text-align: center; padding: 20px; }
+    .chat-btn-switch { background: var(--purple); }
+    .chat-btn-delete { background: var(--danger); }
+    .chat-btn-export { background: var(--success); }
+    .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 20px; }
 
     /* 显示设置 */
     .radio-group { display: flex; gap: 0; border-radius: 6px; overflow: hidden; }
     .radio-btn {
-      flex: 1; padding: 10px; border: 1px solid #223; background: #111; color: #888;
+      flex: 1; padding: 10px; border: 1px solid #d2c6bd; background: #fffdfa; color: var(--muted);
       font-size: 13px; text-align: center; cursor: pointer; transition: all 0.15s;
     }
-    .radio-btn.active { background: #0047AB; color: #fff; border-color: #0047AB; }
+    .radio-btn.active { background: var(--purple); color: #fff; border-color: var(--purple); }
     .radio-btn:first-child { border-radius: 6px 0 0 6px; }
     .radio-btn:last-child { border-radius: 0 6px 6px 0; }
-    .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 10px; background: #111; border-radius: 6px; margin-bottom: 8px; }
-    .toggle-label { font-size: 14px; color: #ddd; }
+    .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 12px; background: #fffdfa; border: 1px solid #e4dad1; border-radius: 10px; margin-bottom: 8px; }
+    .toggle-label { font-size: 14px; color: var(--ink); }
     .toggle-switch { position: relative; width: 44px; height: 24px; cursor: pointer; }
     .toggle-switch input { opacity: 0; width: 0; height: 0; }
-    .toggle-slider { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: #333; border-radius: 12px; transition: background 0.2s; }
+    .toggle-slider { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: #bcb3ad; border-radius: 12px; transition: background 0.2s; }
     .toggle-slider::before { content: ''; position: absolute; width: 18px; height: 18px; left: 3px; bottom: 3px; background: #fff; border-radius: 50%; transition: transform 0.2s; }
-    .toggle-switch input:checked + .toggle-slider { background: #0047AB; }
+    .toggle-switch input:checked + .toggle-slider { background: var(--orange); }
     .toggle-switch input:checked + .toggle-slider::before { transform: translateX(20px); }
-    .beta-badge { display: inline-block; font-size: 10px; color: #fff; background: #666; padding: 1px 6px; border-radius: 4px; margin-left: 6px; vertical-align: middle; }
-    .beta-hint { font-size: 11px; color: #a60; margin-top: 4px; }
-    .release-notice {
-      margin: 0 0 16px; padding: 11px 12px; border: 1px solid #9a5b00;
-      border-radius: 7px; background: #2b1b08; color: #ffc66d;
-      font-size: 12px; line-height: 1.45;
+    .beta-badge { display: inline-block; font-size: 9px; color: #fff; background: var(--purple); padding: 2px 6px; border-radius: 999px; margin-left: 5px; vertical-align: middle; }
+    .beta-hint { font-size: 11px; color: #95601d; margin-top: 5px; }
+    .subgroup { padding-top: 14px; margin-top: 14px; border-top: 1px solid var(--line); }
+    @media (max-width: 390px) {
+      body { padding-left: 10px; padding-right: 10px; }
+      .chat-item { align-items: flex-start; }
+      .chat-actions { flex-direction: column; }
+      .model-input-row { gap: 6px; }
     }
   </style>
 </head>
 <body>
-  <h1>Wrist AI</h1>
+  <header class="app-header">
+    <div class="brand-mark">Wi</div>
+    <div>
+      <h1>Wrist AI</h1>
+      <div class="subtitle">Watch settings · v1.4.2</div>
+    </div>
+  </header>
   <div class="release-notice">
-    v1.4.0 features: Start Listening on Launch, multi-day Health and Sleep,
-    Pebble 2 Duo TTS, and Timeline require the v1.4.0 watch app update.
-    These options do not take effect on older Wrist AI versions.
+    v1.4.2 adds exact Sleep intervals, Notes and TODOs, strong local reminders,
+    launch-aware Timeline, long-term Memory, and Simplified Chinese normalization.
+    Install the v1.4.2 watch app before relying on these features.
   </div>
 
-<!-- API 设置 -->
-   <div class="field">
+  <details class="section-card" open>
+    <summary><h2>AI connection</h2><span class="section-kicker">Provider, key and models</span></summary>
+    <div class="section-body">
+    <div class="field">
      <label>API Provider</label>
      <div class="mode-toggle">
        <div class="mode-btn active" id="mode_openrouter" data-mode="openrouter">OpenRouter</div>
@@ -126,20 +215,131 @@
        <input type="url" id="custom_api_url" placeholder="https://api.example.com/v1/chat/completions">
        <div class="hint">OpenAI-compatible endpoint (must accept /v1/chat/completions format)</div>
      </div>
-   </div>
+    </div>
 
-   <div class="field" id="api_key_wrap">
+    <div class="field" id="api_key_wrap">
      <label>API Key</label>
      <input type="password" id="api_key" placeholder="sk-or-v1-xxxx...">
      <div class="status" id="key_status"></div>
-   </div>
+    </div>
 
-   <div class="field" id="voice_wrap">
+    <div class="field">
+      <label>Models (max 5)</label>
+      <div class="model-input-row">
+        <input type="text" id="model_input" placeholder="e.g. openai/gpt-5-mini">
+        <button class="model-add-btn" id="model_add" title="Add model">+</button>
+      </div>
+      <ul class="model-list" id="model_list_el"></ul>
+      <div class="hint">The active model handles requests. Up to five models are available from the watch menu.</div>
+    </div>
+    </div>
+  </details>
+
+  <details class="section-card">
+    <summary><h2>AI behavior</h2><span class="section-kicker">Prompt, search and context</span></summary>
+    <div class="section-body">
+      <div class="field">
+        <label>System Prompt</label>
+        <textarea id="system_message"></textarea>
+        <div class="hint">Your custom prompt is combined with Wrist AI's watch safety and feature rules.</div>
+      </div>
+      <div class="field">
+        <div class="toggle-row">
+          <span class="toggle-label">Web Search <span class="beta-badge">Beta</span></span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="web_search_enabled">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="hint">OpenRouter only. Wrist AI removes links and source lists from watch replies.</div>
+      </div>
+      <div class="field">
+        <div class="toggle-row">
+          <span class="toggle-label">Send Location to AI <span class="beta-badge">Beta</span></span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="location_enabled">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="hint">Includes approximate GPS context with each request when enabled.</div>
+      </div>
+    </div>
+  </details>
+
+  <details class="section-card">
+    <summary><h2>Watch experience</h2><span class="section-kicker">Listening, text and shortcuts</span></summary>
+    <div class="section-body">
+      <div class="field">
+        <label>Reply Font Size</label>
+        <div class="radio-group">
+          <div class="radio-btn active" data-size="0" id="font_size_s">Small</div>
+          <div class="radio-btn" data-size="1" id="font_size_m">Medium</div>
+          <div class="radio-btn" data-size="2" id="font_size_l">Large</div>
+        </div>
+      </div>
+      <div class="field">
+        <div class="toggle-row">
+          <span class="toggle-label">Start Listening on Launch</span>
+          <label class="toggle-switch"><input type="checkbox" id="auto_dictation"><span class="toggle-slider"></span></label>
+        </div>
+        <div class="hint">Starts one Dictation session when Wrist AI opens and sends the recognized question directly.</div>
+      </div>
+      <div class="field">
+        <div class="toggle-row">
+          <span class="toggle-label">Bold Reply Text</span>
+          <label class="toggle-switch"><input type="checkbox" id="font_bold"><span class="toggle-slider"></span></label>
+        </div>
+      </div>
+      <div class="field">
+        <div class="toggle-row">
+          <span class="toggle-label">Enable Surprise Me</span>
+          <label class="toggle-switch"><input type="checkbox" id="enable_surprise" checked><span class="toggle-slider"></span></label>
+        </div>
+        <div class="hint">Long-press DOWN from the reply page to send a random question.</div>
+      </div>
+    </div>
+  </details>
+
+  <details class="section-card">
+    <summary><h2>Health and planning</h2><span class="section-kicker">Health context, Timeline and reminders</span></summary>
+    <div class="section-body">
+      <div class="field">
+        <div class="toggle-row">
+          <span class="toggle-label">Create Timeline Events <span class="beta-badge">Beta</span></span>
+          <label class="toggle-switch"><input type="checkbox" id="timeline_enabled"><span class="toggle-slider"></span></label>
+        </div>
+        <div class="hint">Creates timed and all-day events from natural requests. Actionable events can also create linked TODOs. Timeline removal remains manual on the watch.</div>
+      </div>
+      <div class="field subgroup">
+        <div class="toggle-row">
+          <span class="toggle-label">Send Health Data to AI <span class="beta-badge">Beta</span></span>
+          <label class="toggle-switch"><input type="checkbox" id="health_enabled"><span class="toggle-slider"></span></label>
+        </div>
+        <div class="hint">Includes multi-day activity and optional exact sleep history in AI context.</div>
+        <label style="margin-top:10px">History Range</label>
+        <select id="health_days">
+          <option value="1">Today</option>
+          <option value="3">Last 3 days</option>
+          <option value="7">Last 7 days</option>
+        </select>
+        <div class="toggle-row" style="margin-top:8px">
+          <span class="toggle-label">Include Sleep and Deep Sleep</span>
+          <label class="toggle-switch"><input type="checkbox" id="health_sleep"><span class="toggle-slider"></span></label>
+        </div>
+        <div class="beta-hint">Requires Pebble Health to be enabled on the watch.</div>
+      </div>
+    </div>
+  </details>
+
+  <details class="section-card" id="voice_wrap">
+    <summary><h2>Voice output</h2><span class="section-kicker">TTS key, speed and Duo testing</span></summary>
+    <div class="section-body">
+    <div class="field">
      <label>Google Cloud TTS API Key <span class="beta-badge">Beta</span></label>
      <input type="password" id="tts_api_key" placeholder="AIza...">
      <div class="hint">Required for text-to-speech. Get a key from Google Cloud Console. Supported on Pebble Time 2; Pebble 2 Duo support is experimental and disabled by default.</div>
      <label style="margin-top:8px;display:block">Speech Rate</label>
-     <select id="tts_rate" style="width:100%;padding:6px;background:#1a1a2e;color:#fff;border:1px solid #444;border-radius:4px">
+     <select id="tts_rate">
        <option value="0.75">0.75× (Slower)</option>
        <option value="1.0" selected>1.0× (Normal)</option>
        <option value="1.25">1.25× (Faster)</option>
@@ -155,141 +355,26 @@
        </div>
        <div class="beta-hint">⚠️ Disabled by default because Duo playback has not been validated on real hardware.</div>
      </div>
-     <div class="beta-hint">⚠️ Emery TTS was introduced in v1.3.0; experimental Duo support requires v1.4.0.</div>
+     <div class="beta-hint">⚠️ Emery TTS was introduced in v1.3.0; experimental Duo support requires v1.4.0 or later.</div>
      <button class="btn btn-danger" id="delete_tts_key" style="margin-top:6px">Delete TTS Key</button>
-   </div>
-
-  <!-- 模型列表管理 -->
-  <div class="field">
-    <label>Models (max 5)</label>
-    <div class="model-input-row">
-      <input type="text" id="model_input" placeholder="Enter model name, e.g. google/gemma-4-31b-it">
-      <button class="model-add-btn" id="model_add" title="Add model">✓</button>
     </div>
-    <ul class="model-list" id="model_list_el"></ul>
-    <div class="hint">Current active model is used for AI requests. Tap Switch to change. Max 5 models.</div>
-  </div>
-
-  <div class="field">
-    <label>System Prompt</label>
-    <textarea id="system_message"></textarea>
-  </div>
-
-  <!-- 显示设置 -->
-  <div class="field">
-    <label>Font Size</label>
-    <div class="radio-group">
-      <div class="radio-btn active" data-size="0" id="font_size_s">S</div>
-      <div class="radio-btn" data-size="1" id="font_size_m">M</div>
-      <div class="radio-btn" data-size="2" id="font_size_l">L</div>
     </div>
-    <div class="hint">Reply text size on watch</div>
-  </div>
+  </details>
 
-  <div class="field">
-    <div class="toggle-row">
-      <span class="toggle-label">Start Listening on Launch</span>
-      <label class="toggle-switch">
-        <input type="checkbox" id="auto_dictation">
-        <span class="toggle-slider"></span>
-      </label>
+  <details class="section-card">
+    <summary><h2>Conversations</h2><span class="section-kicker">Switch, export or remove local chats</span></summary>
+    <div class="section-body"><ul class="chat-list" id="chat_list"></ul></div>
+  </details>
+
+  <details class="section-card danger-card">
+    <summary><h2>Data and keys</h2><span class="section-kicker">Destructive actions require a second tap</span></summary>
+    <div class="section-body">
+      <button class="btn btn-danger" id="clear_all">Delete All Conversations</button>
+      <button class="btn btn-danger" id="delete_key">Delete API Key</button>
     </div>
-    <div class="hint">Start voice dictation once when Wrist AI is opened. Recognition is sent directly to the selected LLM.</div>
-  </div>
+  </details>
 
-  <div class="field">
-    <div class="toggle-row">
-      <span class="toggle-label">Create Timeline Events <span class="beta-badge">Beta</span></span>
-      <label class="toggle-switch">
-        <input type="checkbox" id="timeline_enabled">
-        <span class="toggle-slider"></span>
-      </label>
-    </div>
-    <div class="hint">Create timed reminders and date-only all-day events through chat. Far-future pins may not be visible immediately on the watch. To remove an event, open its details on the watch and choose Remove.</div>
-  </div>
-
-  <div class="field">
-    <div class="toggle-row">
-      <span class="toggle-label">Bold Text</span>
-      <label class="toggle-switch">
-        <input type="checkbox" id="font_bold">
-        <span class="toggle-slider"></span>
-      </label>
-    </div>
-  </div>
-
-  <div class="field">
-    <div class="toggle-row">
-      <span class="toggle-label">Enable Surprise Me</span>
-      <label class="toggle-switch">
-        <input type="checkbox" id="enable_surprise" checked>
-        <span class="toggle-slider"></span>
-    </label>
-    </div>
-    <div class="hint">Long-press DOWN to send a random question</div>
-  </div>
-
-  <div class="field">
-    <div class="toggle-row">
-      <span class="toggle-label">Send Location to AI <span class="beta-badge">Beta</span></span>
-      <label class="toggle-switch">
-        <input type="checkbox" id="location_enabled">
-        <span class="toggle-slider"></span>
-      </label>
-    </div>
-    <div class="hint">Include approximate GPS location in AI context. Sent to your AI provider with each question when enabled.</div>
-    <div class="beta-hint">⚠️ This feature is part of v1.3.0 (beta).</div>
-  </div>
-
-  <div class="field">
-    <div class="toggle-row">
-      <span class="toggle-label">Web Search <span class="beta-badge">Beta</span></span>
-      <label class="toggle-switch">
-        <input type="checkbox" id="web_search_enabled">
-        <span class="toggle-slider"></span>
-      </label>
-    </div>
-    <div class="hint">Let models search the web for current information (OpenRouter only). May increase reply latency. Some models may not support it — if you get an error, turn this off or switch models.</div>
-    <div class="beta-hint">⚠️ This feature is part of v1.3.0 (beta).</div>
-  </div>
-
-  <div class="field">
-    <div class="toggle-row">
-      <span class="toggle-label">Send Health Data to AI <span class="beta-badge">Beta</span></span>
-      <label class="toggle-switch">
-        <input type="checkbox" id="health_enabled">
-        <span class="toggle-slider"></span>
-      </label>
-    </div>
-    <div class="hint">Include multi-day activity and optional sleep history in AI context. Sent to your AI provider with each question when enabled.</div>
-    <label>History Range</label>
-    <select id="health_days" style="width:100%;padding:6px;background:#1a1a2e;color:#fff;border:1px solid #444;border-radius:4px">
-      <option value="1">Today</option>
-      <option value="3">Last 3 days</option>
-      <option value="7">Last 7 days</option>
-    </select>
-    <div class="toggle-row" style="margin-top:8px">
-      <span class="toggle-label">Include Sleep and Deep Sleep</span>
-      <label class="toggle-switch">
-        <input type="checkbox" id="health_sleep">
-        <span class="toggle-slider"></span>
-      </label>
-    </div>
-    <div class="beta-hint">⚠️ Requires Pebble Health to be enabled on the watch.</div>
-  </div>
-
-  <button class="btn btn-primary" id="save">Save Settings</button>
-
-  <div class="divider"></div>
-
-  <!-- 对话管理 -->
-  <h2>Conversations</h2>
-  <ul class="chat-list" id="chat_list"></ul>
-
-  <div class="divider"></div>
-
-  <button class="btn btn-danger" id="clear_all">Delete All Conversations</button>
-  <button class="btn btn-danger" id="delete_key" style="margin-top:8px">Delete API Key</button>
+  <div class="save-dock"><button class="btn btn-primary" id="save">Save Settings</button></div>
 
   <script>
     function getParam(name) {
