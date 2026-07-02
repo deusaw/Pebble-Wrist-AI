@@ -1,7 +1,7 @@
 {
   "name": "pebble-wrist-ai",
   "author": "deusaw",
-  "version": "1.4.2",
+  "version": "1.5.0",
   "keywords": [
     "pebble-app"
   ],
@@ -57,6 +57,7 @@
       "TTS_CANCEL",
       "TTS_PAUSE",
       "TTS_RESUME",
+      "TTS_FORMAT",
       "AUTO_DICTATION",
       "HEALTH_DATA",
       "HEALTH_SLEEP_INTERVALS",
@@ -69,7 +70,8 @@
       "NOTE_WAKEUP",
       "THEME_COLOR",
       "SYNC_STATUS",
-      "SYNC_WAKEUP"
+      "SYNC_WAKEUP",
+      "CONTROLS_VISIBLE"
     ],
     "resources": {
       "media": [

@@ -24,11 +24,9 @@ var WATCH_CHUNK_MAX_BYTES = 240;  // AppMessage 文本块按 UTF-8 字节限制
 var MEMORY_MAX_BYTES = 12000;
 var MEMORY_MAX_ITEMS = 40;
 var MAX_NOTES = 50;
-var MAX_WATCH_NOTES = 20;
 var TODOIST_API = 'https://api.todoist.com/api/v1';
 var todoistSyncRunning = false;
 var todoistApplyingRemote = false;
-var todoistStatusGeneration = 0;
 
 // 默认 System Prompt：强制简洁回复、禁止 Markdown，适应手表小屏幕
 var DEFAULT_PROMPT = "You are Pebble Wrist AI, a concise assistant on a Pebble smartwatch. Rules: 1) Reply ONLY with the final answer, no reasoning or thinking process. Hidden machine-readable control blocks (such as [[NOTE_ACTIONS]]...[[/NOTE_ACTIONS]]) are NOT reasoning and MUST still be emitted when the prompt instructs you to. 2) Keep responses under 400 words in English, or under 400 Chinese characters. 3) No markdown, no bullet lists. 4) Use plain sentences only.";
@@ -275,7 +273,21 @@ function loadNotes() {
 }
 
 function saveNotes(notes) {
-  notes = notes.slice(-MAX_NOTES);
+  var open = [];
+  var archived = [];
+  for (var i = 0; i < notes.length; i++) {
+    if (notes[i] && notes[i].status === 'done') archived.push(notes[i]);
+    else if (notes[i]) open.push(notes[i]);
+  }
+  open.sort(function(a, b) {
+    return (a.updated || a.created || 0) - (b.updated || b.created || 0);
+  });
+  archived.sort(function(a, b) {
+    return (a.updated || a.created || 0) - (b.updated || b.created || 0);
+  });
+  // Active items and completed Archive have independent retention. Archive is
+  // exactly the latest 50 completions; older entries are permanently pruned.
+  notes = open.slice(-MAX_NOTES).concat(archived.slice(-50));
   try {
     localStorage.setItem('note_store', JSON.stringify(notes));
     return true;
@@ -294,10 +306,18 @@ function findNote(notes, id) {
 
 function sendNoteList() {
   reconcileTimelineNotes();
-  var notes = loadNotes().slice().sort(function(a, b) {
-    if (a.status !== b.status) return a.status === 'open' ? -1 : 1;
+  var allNotes = loadNotes();
+  var open = allNotes.filter(function(note) {
+    return note.status !== 'done';
+  }).sort(function(a, b) {
     return (b.updated || b.created || 0) - (a.updated || a.created || 0);
-  }).slice(0, MAX_WATCH_NOTES);
+  }).slice(0, 20);
+  var archived = allNotes.filter(function(note) {
+    return note.status === 'done';
+  }).sort(function(a, b) {
+    return (b.updated || b.created || 0) - (a.updated || a.created || 0);
+  }).slice(0, 10);
+  var notes = open.concat(archived);
   var lines = [];
   for (var i = 0; i < notes.length; i++) {
     var due = noteDueLabel(notes[i]);
@@ -314,14 +334,18 @@ function sendNoteList() {
 }
 
 function noteDueLabel(note) {
-  if (!note || !note.due) return '';
+  if (!note) return '';
+  var prefix = note.timeline_pin_id ? 'Timeline ' :
+    (note.type === 'todo' ? 'TODO ' :
+      (note.type === 'event' ? 'Event ' : 'Note '));
+  if (!note.due) return prefix.trim();
   var raw = String(note.due);
   var date = new Date(raw);
-  if (isNaN(date.getTime())) return raw.substring(0, 16);
+  if (isNaN(date.getTime())) return (prefix + raw).substring(0, 27);
   if (note.all_day)
-    return (date.getMonth() + 1) + '/' + date.getDate() + ' All day';
+    return prefix + (date.getMonth() + 1) + '/' + date.getDate() + ' All day';
   function pad(value) { return value < 10 ? '0' + value : String(value); }
-  return (date.getMonth() + 1) + '/' + date.getDate() + ' ' +
+  return prefix + (date.getMonth() + 1) + '/' + date.getDate() + ' ' +
     pad(date.getHours()) + ':' + pad(date.getMinutes());
 }
 
@@ -635,6 +659,10 @@ function getSetting(key, defaultVal) {
 function todoistEnabled() {
   return getSetting('todoist_enabled', '0') === '1' &&
     !!getSetting('todoist_token', '');
+}
+
+function todoistRequested() {
+  return getSetting('todoist_enabled', '0') === '1';
 }
 
 function loadTodoistOutbox() {
@@ -961,6 +989,12 @@ function taskDueValue(task) {
   return task.due.datetime || task.due.date || null;
 }
 
+function todoistDueIsAllDay(task) {
+  if (!task || !task.due) return false;
+  var value = task.due.datetime || task.due.date || '';
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value));
+}
+
 function todoistPinId(taskId) {
   // Pebble forbids reusing a Pin ID after deletion. A reopened Todoist task
   // therefore gets a fresh generation while its active updates keep the map ID.
@@ -1087,7 +1121,7 @@ function applyTodoistTask(task) {
         note.content = toSimplifiedChinese(String(task.description || ''))
           .substring(0, 1000);
         note.due = String(due).substring(0, 40);
-        note.all_day = task.due && task.due.date && !task.due.datetime;
+        note.all_day = todoistDueIsAllDay(task);
         note.status = 'open';
         note.updated = Date.now();
         saveNotes(notes);
@@ -1108,7 +1142,7 @@ function applyTodoistTask(task) {
           title: task.content || 'Todoist event',
           content: task.description || '',
           due: String(due).substring(0, 40),
-          all_day: task.due && task.due.date && !task.due.datetime
+          all_day: todoistDueIsAllDay(task)
         }, newTimelineLink ? newTimelineLink.entry.pin_id : null);
         notes = loadNotes();
         note = findNote(notes, note.id);
@@ -1237,28 +1271,20 @@ function sendTodoistStatus(explicit) {
   var status = explicit;
   if (!status) {
     var pending = loadTodoistOutbox().length;
-    status = pending ? 'Pending ' + pending : 'Synced';
+    status = pending ? 'Todoist pending ' + pending : 'Synced Todoist';
   }
-  todoistStatusGeneration++;
-  var generation = todoistStatusGeneration;
   sendToWatch({ 'SYNC_STATUS': status.substring(0, 23) });
-  if (status === 'Synced') {
-    setTimeout(function() {
-      if (generation === todoistStatusGeneration)
-        sendToWatch({ 'SYNC_STATUS': '' });
-    }, 2500);
-  }
 }
 
 function syncTodoist() {
   if (!todoistEnabled() || todoistSyncRunning) return;
   todoistSyncRunning = true;
-  sendTodoistStatus('Syncing...');
+  sendTodoistStatus('Syncing Todoist');
   processTodoistOutbox(function(outboxError) {
     if (outboxError) {
       todoistSyncRunning = false;
       sendTodoistStatus(outboxError.indexOf('network') >= 0 ?
-        'Offline' : 'Sync failed');
+        'Todoist offline' : 'Todoist failed');
       scheduleNextTodoistWakeup();
       return;
     }
@@ -1266,10 +1292,10 @@ function syncTodoist() {
       todoistSyncRunning = false;
       if (pullError) {
         sendTodoistStatus(pullError.indexOf('network') >= 0 ?
-          'Offline' : 'Sync failed');
+          'Todoist offline' : 'Todoist failed');
       } else {
         localStorage.setItem('todoist_last_sync', String(Date.now()));
-        sendTodoistStatus('Synced');
+        sendTodoistStatus('Synced Todoist');
       }
       scheduleNextTodoistWakeup();
       if (loadTodoistOutbox().length > 0)
@@ -1293,24 +1319,44 @@ function normalizeMemoryKey(key) {
 function cleanMemoryValue(value) {
   return String(value || '')
     .replace(/[\r\n]+/g, ' ')
-    .replace(/\[\[(?:\/)?(?:MEMORY_UPDATE|TIMELINE_EVENT)\]\]/g, '')
+    .replace(/\[\[(?:\/)?(?:MEMORY_UPDATE|TIMELINE_EVENT|NOTE_ACTIONS)\]\]/g, '')
     .replace(/\s{2,}/g, ' ')
     .trim()
     .substring(0, 300);
 }
 
-function loadMemoryItems() {
-  var raw = localStorage.getItem('memory_md') || '';
+function isSensitiveMemoryEntry(key, value) {
+  var combined = (String(key || '') + ' ' + String(value || '')).toLowerCase();
+  if (/(?:password|passcode|api[_\s-]?key|access[_\s-]?token|auth[_\s-]?token|secret|credit[_\s-]?card|bank[_\s-]?account|密码|口令|密钥|令牌|银行卡|卡号|银行账号)/i.test(combined))
+    return true;
+  if (/(?:sk-[a-z0-9_-]{16,}|bearer\s+[a-z0-9._-]{16,})/i.test(combined))
+    return true;
+  return false;
+}
+
+function parseMemoryMarkdown(raw) {
+  raw = String(raw || '');
   var items = [];
+  var itemIndex = {};
   var lines = raw.split('\n');
   for (var i = 0; i < lines.length; i++) {
     var match = lines[i].match(/^- ([^:]{1,48}):\s*(.+)$/);
     if (!match) continue;
     var key = normalizeMemoryKey(match[1]);
     var value = cleanMemoryValue(match[2]);
-    if (key && value) items.push({ key: key, value: value });
+    if (!key || !value || isSensitiveMemoryEntry(key, value)) continue;
+    if (typeof itemIndex[key] === 'number') {
+      items[itemIndex[key]].value = value;
+    } else if (items.length < MEMORY_MAX_ITEMS) {
+      itemIndex[key] = items.length;
+      items.push({ key: key, value: value });
+    }
   }
-  return items.slice(0, MEMORY_MAX_ITEMS);
+  return items;
+}
+
+function loadMemoryItems() {
+  return parseMemoryMarkdown(localStorage.getItem('memory_md') || '');
 }
 
 function renderMemoryMarkdown(items) {
@@ -1331,6 +1377,61 @@ function getMemoryMarkdown() {
   return items.length > 0 ? renderMemoryMarkdown(items) : '';
 }
 
+function saveMemoryItems(items) {
+  var safeItems = [];
+  for (var i = 0; i < items.length && safeItems.length < MEMORY_MAX_ITEMS; i++) {
+    var key = normalizeMemoryKey(items[i] && items[i].key);
+    var value = cleanMemoryValue(items[i] && items[i].value);
+    if (!key || !value || isSensitiveMemoryEntry(key, value)) continue;
+    safeItems.push({ key: key, value: value });
+  }
+  var markdown = renderMemoryMarkdown(safeItems);
+  // Newest entries are appended by applyMemoryUpdate. If capacity is exceeded,
+  // drop the oldest entries while preserving the user's latest corrections.
+  while (utf8ByteLength(markdown) > MEMORY_MAX_BYTES && safeItems.length > 0) {
+    safeItems.shift();
+    markdown = renderMemoryMarkdown(safeItems);
+  }
+  try {
+    localStorage.setItem('memory_md', markdown);
+    console.log('[Memory] Saved items=' + safeItems.length);
+    return true;
+  } catch (e) {
+    console.log('[Memory] Save failed: ' + e);
+    return false;
+  }
+}
+
+function replaceMemoryMarkdownFromConfig(markdown) {
+  if (typeof markdown !== 'string') return false;
+  // Bound hostile/corrupt WebView payloads before parsing. The persisted result
+  // is independently constrained to 12KB by saveMemoryItems.
+  if (utf8ByteLength(markdown) > MEMORY_MAX_BYTES * 2) {
+    console.log('[Memory] Config payload rejected: too large');
+    return false;
+  }
+  var parsed = parseMemoryMarkdown(markdown);
+  var lines = markdown.split('\n');
+  var invalidContent = false;
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim();
+    if (!line || line.charAt(0) === '#' ||
+        /^<!--[\s\S]*-->$/.test(line)) continue;
+    if (!/^- [^:]{1,48}:\s*.+$/.test(line)) {
+      invalidContent = true;
+      break;
+    }
+  }
+  // Preserve the previous document instead of turning a malformed manual edit
+  // into an accidental full wipe. A genuinely blank/header-only document is a
+  // deliberate clear and remains allowed.
+  if (invalidContent) {
+    console.log('[Memory] Config payload rejected: invalid line format');
+    return false;
+  }
+  return saveMemoryItems(parsed);
+}
+
 function applyMemoryUpdate(update) {
   if (!update || typeof update !== 'object') return false;
   var items = loadMemoryItems();
@@ -1342,7 +1443,7 @@ function applyMemoryUpdate(update) {
   }
 
   var remove = Array.isArray(update.remove) ? update.remove : [];
-  for (var r = 0; r < remove.length; r++) {
+  for (var r = 0; r < remove.length && r < 3; r++) {
     var removeKey = normalizeMemoryKey(remove[r]);
     if (!removeKey || typeof byKey[removeKey] === 'undefined') continue;
     delete byKey[removeKey];
@@ -1350,7 +1451,7 @@ function applyMemoryUpdate(update) {
   }
 
   var upsert = Array.isArray(update.upsert) ? update.upsert : [];
-  for (var u = 0; u < upsert.length; u++) {
+  for (var u = 0; u < upsert.length && u < 3; u++) {
     if (!upsert[u] || typeof upsert[u] !== 'object') continue;
     var key = normalizeMemoryKey(upsert[u].key);
     var value = cleanMemoryValue(upsert[u].value);
@@ -1365,19 +1466,50 @@ function applyMemoryUpdate(update) {
       next.push({ key: order[o], value: byKey[order[o]] });
     }
   }
-  var markdown = renderMemoryMarkdown(next);
-  while (utf8ByteLength(markdown) > MEMORY_MAX_BYTES && next.length > 0) {
-    next.shift();
-    markdown = renderMemoryMarkdown(next);
+  return saveMemoryItems(next);
+}
+
+function isLikelyStableMemoryIntent(question) {
+  var text = String(question || '').trim();
+  var explicitMemory =
+    /(?:记住|记得|长期记忆|个人资料|忘掉|忘记|从记忆中删除|remember|memory|forget)/i.test(text);
+  if (!explicitMemory) return false;
+  return /(?:我是|我叫|我的(?:生日|出生|年龄|名字|姓名|偏好|习惯|目标|家乡|职业)|我(?:出生|喜欢|偏好|习惯|住在|来自|需要|不喜欢)|i am|i'm|my (?:name|birthday|birth date|preference|habit|goal|job)|i was born|i (?:prefer|like|dislike|live|need)|long-term memory|长期记忆|从记忆中删除|forget)/i.test(text);
+}
+
+function fallbackExplicitMemoryUpdate(question) {
+  var text = String(question || '');
+  var birth = text.match(/((?:19|20)\d{2})\s*[年\/\-.]\s*(\d{1,2})\s*[月\/\-.]\s*(\d{1,2})\s*日?/);
+  if (birth && /(?:出生|生日|born|birthday)/i.test(text)) {
+    var month = parseInt(birth[2], 10);
+    var day = parseInt(birth[3], 10);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return {
+        upsert: [{
+          key: 'birth_date',
+          value: 'User was born on ' + birth[1] + '-' +
+            (month < 10 ? '0' : '') + month + '-' +
+            (day < 10 ? '0' : '') + day
+        }],
+        remove: []
+      };
+    }
   }
-  try {
-    localStorage.setItem('memory_md', markdown);
-    console.log('[Memory] Updated items=' + next.length);
-    return true;
-  } catch (e) {
-    console.log('[Memory] Save failed: ' + e);
-    return false;
+  return null;
+}
+
+function memoryUpdateHasUsableMutation(update) {
+  if (!update || typeof update !== 'object') return false;
+  var upserts = Array.isArray(update.upsert) ? update.upsert : [];
+  for (var i = 0; i < upserts.length && i < 3; i++) {
+    var key = normalizeMemoryKey(upserts[i] && upserts[i].key);
+    var value = cleanMemoryValue(upserts[i] && upserts[i].value);
+    if (key && value && !isSensitiveMemoryEntry(key, value)) return true;
   }
+  var removes = Array.isArray(update.remove) ? update.remove : [];
+  for (var r = 0; r < removes.length && r < 3; r++)
+    if (normalizeMemoryKey(removes[r])) return true;
+  return false;
 }
 
 function timelineLaunchCode(pinId) {
@@ -1637,10 +1769,11 @@ function sendReadyStatus() {
     var healthSleep = parseInt(getSetting('health_sleep', '1'), 10);
     var duoTtsEnabled = parseInt(getSetting('duo_tts_enabled', '0'), 10);
     var themeColor = parseInt(getSetting('theme_color', '-1'), 10);
+    var controlsVisible = parseInt(getSetting('controls_visible', '1'), 10);
     if (isNaN(themeColor) || themeColor < -1 || themeColor > 6)
       themeColor = -1;
     console.log('[Settings] healthEnabled=' + healthEnabled + ' webSearch=' + webSearch);
-    sendToWatch({ 'FONT_SIZE': fontSize, 'FONT_BOLD': fontBold, 'DISABLE_SURPRISE': disableSurprise, 'HEALTH_ENABLED': healthEnabled, 'WEB_SEARCH_ENABLED': webSearch, 'AUTO_DICTATION': autoDictation, 'HEALTH_DAYS': healthDays, 'HEALTH_SLEEP': healthSleep, 'DUO_TTS_ENABLED': duoTtsEnabled, 'THEME_COLOR': themeColor });
+    sendToWatch({ 'FONT_SIZE': fontSize, 'FONT_BOLD': fontBold, 'DISABLE_SURPRISE': disableSurprise, 'HEALTH_ENABLED': healthEnabled, 'WEB_SEARCH_ENABLED': webSearch, 'AUTO_DICTATION': autoDictation, 'HEALTH_DAYS': healthDays, 'HEALTH_SLEEP': healthSleep, 'DUO_TTS_ENABLED': duoTtsEnabled, 'THEME_COLOR': themeColor, 'CONTROLS_VISIBLE': controlsVisible ? 1 : 0 });
   }, 200);
   setTimeout(sendChatList, 400);  // 稍长间隔确保 READY_STATUS 先到
   setTimeout(sendModelList, 800); // 再发模型列表
@@ -1648,6 +1781,9 @@ function sendReadyStatus() {
   setTimeout(function() {
     if (todoistEnabled()) {
       sendTodoistStatus();
+    } else if (todoistRequested()) {
+      sendToWatch({ 'SYNC_STATUS': 'Set up Todoist' });
+      sendToWatch({ 'SYNC_WAKEUP': '0' });
     } else {
       sendToWatch({ 'SYNC_STATUS': '' });
       sendToWatch({ 'SYNC_WAKEUP': '0' });
@@ -2368,6 +2504,8 @@ function planNoteActions(question, callback) {
     'Treat natural requests as Note/TODO actions even when the user never says "Note" or "TODO". A reminder list with no date or time is a TODO list, not Timeline: "三个提醒：洗衣服、买菜、做饭" MUST return three create actions. ' +
     '"帮我记一下X","记个事X","记一下要去X","加个待办/代办X","建个任务X","列个X","把X记下来","记一笔X","note that X","add a todo/task X","remember X". ' +
     'A concrete thing to remember or do — buy, submit, call, prepare, follow up, a name, an amount, an errand — MUST become a create action with that thing as the title. ' +
+    'EXCLUSION: Stable personal facts explicitly intended for long-term memory — birth date, name, identity, durable preference, routine, accessibility need or long-term goal — MUST return []. They are handled by Memory.md, never Notes. ' +
+    '"记住我是1996年11月16日出生" and "remember that I prefer tea" MUST return []. ' +
     'Pure ordinary questions, opinions, weather, explanations, or requests with no durable item to record return []. ' +
     'Timed reminders or calendar events are handled elsewhere; here you only emit standalone Note/TODO actions that are NOT bound to a specific clock time or date. ' +
     'Use type "todo" for actionable items (buy, do, submit, call, prepare, follow up) and "note" for reference info (a name, an account, a fact to keep). ' +
@@ -2431,6 +2569,77 @@ function planNoteActions(question, callback) {
   plannerXhr.ontimeout = function() { callback([]); };
   plannerXhr.timeout = 30000;
   plannerXhr.send(safeJsonStringify({
+    model: model,
+    stream: false,
+    messages: [
+      { role: 'system', content: plannerPrompt },
+      { role: 'user', content: question }
+    ]
+  }));
+}
+
+function planMemoryUpdate(question, callback) {
+  var apiKey = getSetting('api_key', '');
+  var endpoint = getApiEndpoint();
+  var model = getSetting('model', 'google/gemma-4-31b-it');
+  if (!apiKey || !endpoint) {
+    callback(null);
+    return;
+  }
+  var existing = getMemoryMarkdown();
+  var plannerPrompt =
+    'You are the Wrist AI long-term Memory planner. Return ONLY one JSON object ' +
+    'with schema {"upsert":[{"key":"short_key","value":"stable fact"}],"remove":[]}, ' +
+    'or {"upsert":[],"remove":[]} when no memory mutation is requested. No prose or Markdown. ' +
+    'Store only stable personal facts explicitly provided by the user: identity, birth date, ' +
+    'durable preferences, routines, accessibility needs, long-term goals and important context. ' +
+    'Never create Notes, TODOs, reminders or calendar events. Shopping, errands, temporary plans, ' +
+    'amounts to remember and things to do are NOT long-term memory. ' +
+    'Never store passwords, tokens, API keys, financial identifiers, exact health samples or guesses. ' +
+    'When correcting a fact, upsert the same semantic key. When explicitly forgetting a fact, remove ' +
+    'the matching existing key. Use at most 3 upserts and exact existing keys for removal. ' +
+    (existing ? 'Existing Memory.md:\n' + existing + '\n' : '');
+  var memoryXhr = new XMLHttpRequest();
+  memoryXhr.open('POST', endpoint, true);
+  memoryXhr.setRequestHeader('Content-Type', 'application/json');
+  memoryXhr.setRequestHeader('Authorization', 'Bearer ' + apiKey);
+  if (isOpenRouter()) {
+    memoryXhr.setRequestHeader('HTTP-Referer',
+      'https://github.com/deusaw/Pebble-Wrist-AI');
+    memoryXhr.setRequestHeader('X-Title', 'Pebble Wrist AI Memory Planner');
+  }
+  memoryXhr.onload = function() {
+    if (memoryXhr.status >= 400) {
+      callback(null);
+      return;
+    }
+    try {
+      var data = JSON.parse(memoryXhr.responseText);
+      var content = data.choices[0].message.content;
+      if (Array.isArray(content)) {
+        var textPart = '';
+        for (var i = 0; i < content.length; i++) {
+          if (content[i].type === 'text' && content[i].text) {
+            textPart = content[i].text;
+            break;
+          }
+        }
+        content = textPart;
+      }
+      content = String(content || '').trim()
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/\s*```$/, '');
+      var update = JSON.parse(content);
+      callback(update && typeof update === 'object' ? update : null);
+    } catch (e) {
+      console.log('[Memory] Planner parse failed: ' + e);
+      callback(null);
+    }
+  };
+  memoryXhr.onerror = function() { callback(null); };
+  memoryXhr.ontimeout = function() { callback(null); };
+  memoryXhr.timeout = 30000;
+  memoryXhr.send(safeJsonStringify({
     model: model,
     stream: false,
     messages: [
@@ -2522,6 +2731,19 @@ function askAI(question, contextText, onFinish) {
     }
 
     accumulatedReply = toSimplifiedChinese(accumulatedReply);
+    var earlyMemoryResult = extractMemoryUpdates(accumulatedReply);
+    accumulatedReply = earlyMemoryResult.cleanReply;
+    var memoryUpdateApplied = false;
+    for (var earlyMemoryIndex = 0;
+         earlyMemoryIndex < earlyMemoryResult.updates.length;
+         earlyMemoryIndex++) {
+      var earlyUpdate = earlyMemoryResult.updates[earlyMemoryIndex];
+      if (memoryUpdateHasUsableMutation(earlyUpdate) &&
+          applyMemoryUpdate(earlyUpdate)) {
+        memoryUpdateApplied = true;
+      }
+    }
+    var stableMemoryIntent = isLikelyStableMemoryIntent(question);
     var noteResult = extractNoteActions(accumulatedReply);
     accumulatedReply = noteResult.cleanReply;
     // Pure control-block authorization (see NOTE_RULES in the system prompt):
@@ -2555,13 +2777,6 @@ function askAI(question, contextText, onFinish) {
     function finalizeReplyAfterNotes(actions) {
       if (thisSessionId !== currentAskSessionId) return;
       applyNoteActionsAndAppend(actions);
-
-    var memoryResult = extractMemoryUpdates(accumulatedReply);
-    accumulatedReply = memoryResult.cleanReply;
-    for (var memoryIndex = 0; memoryIndex < memoryResult.updates.length;
-         memoryIndex++) {
-      applyMemoryUpdate(memoryResult.updates[memoryIndex]);
-    }
 
     var timelineResult = { cleanReply: accumulatedReply, event: null };
     if (accumulatedReply) {
@@ -2634,10 +2849,18 @@ function askAI(question, contextText, onFinish) {
     completeResponse(timelineResult.event, false);
     }  // end finalizeReplyAfterNotes
 
-    // 主模型已输出控制块 → 立即执行（快路径）；否则让 Notes Planner 兜底。
-    if (noteResult.actions.length > 0) {
-      finalizeReplyAfterNotes(noteResult.actions);
-    } else {
+    function routeNoteActions() {
+      // Stable personal facts belong exclusively to Memory.md. Even if the
+      // main model mistakenly emitted NOTE_ACTIONS, never create a shadow Note.
+      if (stableMemoryIntent) {
+        finalizeReplyAfterNotes([]);
+        return;
+      }
+      // 主模型已输出控制块 → 立即执行（快路径）；否则让 Notes Planner 兜底。
+      if (noteResult.actions.length > 0) {
+        finalizeReplyAfterNotes(noteResult.actions);
+        return;
+      }
       var directListedNotes = fallbackListedReminderNotes(question);
       if (directListedNotes.length > 0) {
         console.log('[Notes] Creating explicit untimed reminder list locally');
@@ -2648,6 +2871,22 @@ function askAI(question, contextText, onFinish) {
           finalizeReplyAfterNotes(planned);
         });
       }
+    }
+
+    if (stableMemoryIntent && !memoryUpdateApplied) {
+      console.log('[Memory] Stable fact without control block, running planner');
+      planMemoryUpdate(question, function(plannedMemory) {
+        if (thisSessionId !== currentAskSessionId) return;
+        if (memoryUpdateHasUsableMutation(plannedMemory)) {
+          applyMemoryUpdate(plannedMemory);
+        } else {
+          var directMemory = fallbackExplicitMemoryUpdate(question);
+          if (directMemory) applyMemoryUpdate(directMemory);
+        }
+        routeNoteActions();
+      });
+    } else {
+      routeNoteActions();
     }
   };
 
@@ -2672,7 +2911,10 @@ function askAI(question, contextText, onFinish) {
     'answer: [[MEMORY_UPDATE]]{"upsert":[{"key":"concise_key","value":"concise stable fact"}],"remove":[]}[[/MEMORY_UPDATE]]. ' +
     'When the user explicitly asks you to forget or correct a remembered fact, use remove ' +
     'and/or upsert with the same key. Use at most 3 upserts per response. Do not mention ' +
-    'the control block to the user and never place it inside Markdown.';
+    'the control block to the user and never place it inside Markdown. ' +
+    'A request to remember a stable personal fact such as the user birth date, name, identity, ' +
+    'durable preference, routine, accessibility need or long-term goal is MEMORY ONLY: emit ' +
+    'MEMORY_UPDATE and NEVER create NOTE_ACTIONS for the same fact.';
   var notesContext = noteIndexContext();
   if (notesContext) fullSystemMessage += '\n\n' + notesContext;
   fullSystemMessage += '\n\nIMPORTANT OVERRIDE: The hidden machine-readable control blocks in this prompt ([[NOTE_ACTIONS]]...[[/NOTE_ACTIONS]], [[TIMELINE_EVENT]]...[[/TIMELINE_EVENT]], [[MEMORY_UPDATE]]...[[/MEMORY_UPDATE]]) are REQUIRED system instructions, NOT reasoning, NOT extra output, and NOT Markdown. Any earlier rule such as "reply ONLY with the final answer" or "no markdown" MUST NOT suppress them. These blocks are stripped before the user sees anything, so emitting them does not violate conciseness or format rules. If the user asks to remember/note/add a task, you MUST output both the short visible confirmation AND the matching hidden control block — outputting only the words (e.g. only "已记下") without the block means nothing is actually created.';
@@ -2680,6 +2922,8 @@ function askAI(question, contextText, onFinish) {
     'You — the model — are the sole authority for creating/editing Notes. There is no separate word-matching layer, so you MUST emit the control block yourself whenever the user clearly wants it; if you do not emit it, nothing is created. ' +
     'Treat these as mandatory Note/TODO creation requests even if the user never says "Note" or "TODO": "帮我记一下X", "记个事", "记一下要去银行", "加个待办/代办X", "建个任务X", "列个X", "把X记下来", "别忘了X"(when it is a durable item, not a timed reminder), "三个提醒：洗衣服、买菜、做饭"(three separate TODOs because there is no time), "note that X", "add a todo/task X", "remind me about X"(when no specific time is given). ' +
     'Phrases that name a concrete thing to remember or do — buy, submit, call, prepare, follow up, a name, an amount, an errand — MUST produce a TODO with that thing as the title. ' +
+    'Stable personal facts explicitly meant for long-term memory are excluded from Notes. ' +
+    '"记住我是1996年11月16日出生", a user name, identity, durable preference, routine, accessibility need or long-term goal MUST use MEMORY_UPDATE only and MUST NOT create a Note. ' +
     'Do NOT emit the block for ordinary questions, opinions, or explanations where the user is not asking to remember/record anything. ' +
     'When you create a Note/TODO, your ENTIRE reply must be: one short confirmation sentence, then the hidden block. Example for "帮我记一下买菜": 已记下：买菜。[[NOTE_ACTIONS]][{"action":"create","type":"todo","title":"买菜","content":"","due":null,"strong_reminder":false}][[/NOTE_ACTIONS]] ' +
     'Use type "todo" for actionable items (buy, do, submit, call, prepare) and "note" for reference info (a name, an account, a fact to keep). Title must be the concrete subject from the user request, in Simplified Chinese for Chinese input, ≤80 chars. ' +
@@ -2693,7 +2937,7 @@ function askAI(question, contextText, onFinish) {
     fullSystemMessage += '\n\nHealth analysis rule: When the user asks for the latest or most recent sleep, use LATEST_SLEEP_RECORD exactly and never skip it merely because it belongs to the current calendar-date row. The current row can be incomplete for steps, activity, calories, distance, and heart rate, but that does not make its noon-to-noon sleep total invalid. Sleep date labels identify the date on which the noon-to-noon window ends; this affects the label only, not the reported sleep minutes. HealthMetricSleepSeconds is the total sleep duration and HealthMetricSleepRestfulSeconds is deep sleep. Never invent a separate "sleep window versus sleep total" explanation when the supplied values disagree with the user; state the exact supplied values and acknowledge that a fresh sync or data audit may be needed. For broader analysis, do not merely repeat raw values. Convert sleep minutes into hours and minutes, compare appropriate complete records with the multi-day baseline, identify the 2 or 3 most useful trends or anomalies, then give 2 or 3 realistic actions. Do not compare incomplete current-day activity metrics directly with full previous days. Ignore -1 values, avoid medical diagnosis or certainty, and keep the result concise enough for a watch.';
   }
   fullSystemMessage += '\n\nWatch reply size rule: The final user-visible answer must fit within 1800 UTF-8 bytes. As a safe target, use no more than 500 Chinese characters or 1500 English characters, and use less whenever possible. Prioritize the direct answer and essential advice, omit repetition and low-value detail, and finish the answer cleanly instead of relying on truncation. Hidden TIMELINE_EVENT control blocks are excluded from the visible-answer target.';
-  fullSystemMessage += '\n\nWrist AI v1.4.2 capability disclosure: When the user asks what you or Wrist AI can do, describe the current features rather than giving a generic assistant answer. Mention voice conversations, multiple chats and models, long-term memory, Notes and TODOs linked back to their conversations, optional web search, optional multi-day health with exact sleep intervals, optional location context, TTS on supported speaker watches, and conversational Pebble Timeline event creation, reminders, and batch creation when Timeline is enabled. When Todoist sync is enabled, also mention that untimed TODOs and timed Timeline events synchronize with Todoist, including edits and completion from Todoist. Keep the answer concise for a watch.';
+  fullSystemMessage += '\n\nWrist AI v1.5.0 capability disclosure: When the user asks what you or Wrist AI can do, describe the current features rather than giving a generic assistant answer. Mention voice conversations, multiple chats and models, long-term memory, ToDo & Notes linked back to their conversations, optional web search, optional multi-day health with exact sleep intervals, optional location context, TTS on supported speaker watches, and conversational Pebble Timeline event creation, reminders, and batch creation when Timeline is enabled. When Todoist sync is enabled, also mention that untimed TODOs and timed Timeline events synchronize with Todoist, including edits and completion from Todoist. Keep the answer concise for a watch.';
   if (getSetting('timeline_enabled', '0') === '1') {
     fullSystemMessage += '\n\nTimeline capability is enabled. Treat natural reminder language, exact first-person future commitments, and explicit all-day plans as mandatory Timeline actions even if the user never says "Timeline", "event", or "calendar". Phrases such as "remind me to leave in 5 minutes", "do not let me forget the meeting tomorrow at 3 PM", "I need to visit the visa office in 10 days", "all-day team building tomorrow", "remind me", and equivalent Chinese reminder phrases MUST create an event. Always include a brief natural-language confirmation before the hidden block; never answer with only the block. Relative times such as "in 5 minutes", "1 hour later", "in 3 days", and equivalent Chinese relative times are exact and MUST NOT trigger a clarification. For timed events emit [[TIMELINE_EVENT]]{\"action\":\"create\",\"title\":\"Leave\",\"relative_minutes\":5,\"duration_minutes\":0,\"notify\":true,\"reminder_minutes\":0,\"body\":\"\",\"note_type\":\"none\",\"strong_reminder\":false}[[/TIMELINE_EVENT]]. Actionable tasks that must be completed, submitted, purchased, prepared, or followed up use note_type=\"todo\" and note_content; pure appointments or calendar occurrences use note_type=\"none\". Only explicit requests for strong/persistent vibration set strong_reminder=true. For explicit all-day or date-only events, never ask for or invent a clock time; emit [[TIMELINE_EVENT]]{\"action\":\"create\",\"title\":\"Team building\",\"all_day\":true,\"relative_days\":1,\"duration_minutes\":1440,\"notify\":false,\"reminder_minutes\":0,\"body\":\"\",\"note_type\":\"none\"}[[/TIMELINE_EVENT]], where today=0 and tomorrow=1, or use \"date\":\"YYYY-MM-DD\". The phone calculates final timestamps. If the user says "all-day team building tomorrow, remind me at 9 AM", this is ONE all-day event with ONE attached Reminder, not two events: add \"notify\":true and \"reminder_local_time\":\"09:00\" to the same object. Only separate it into another action when the reminder is for a genuinely different task. If the user only asks to add or schedule a timed event, set notify=false. For absolute timed requests use \"time\":\"YYYY-MM-DDTHH:mm:ss+08:00\". If one prompt requests multiple actions, include every action in one JSON array, in order, maximum 5. ' + TIMELINE_MULTI_ACTION_RULES + ' Ask only for genuinely vague timing such as "later" or "someday"; an explicit all-day date is not vague. Timeline deletion is supported for locally known Wrist AI Timeline events. For delete/remove/cancel requests emit [[TIMELINE_EVENT]]{"action":"delete","title":"event title"}[[/TIMELINE_EVENT]], or use {"action":"delete","latest":true} for latest/last/recent and equivalent Chinese wording. If Wrist AI cannot match the local event later, it will ask the user to delete manually. Never wrap JSON in Markdown. Current phone local time: ' + new Date().toString() +
     '. The current timezone offset is ' + currentTimezoneOffset() +
@@ -2769,6 +3013,86 @@ function pcm16ToPcm8(pcm16) {
   return pcm8;
 }
 
+// G.711 μ-law preserves low-level detail better than linear 8-bit PCM while
+// keeping the same one-byte-per-sample wireless bandwidth.
+function pcm16ToMuLaw(pcm16) {
+  var output = [];
+  for (var i = 0; i < pcm16.length; i++) {
+    var sample = pcm16[i] | 0;
+    var sign = 0;
+    if (sample < 0) {
+      sign = 0x80;
+      sample = -sample;
+    }
+    if (sample > 32635) sample = 32635;
+    sample += 0x84;
+    var exponent = 7;
+    for (var mask = 0x4000; exponent > 0 && !(sample & mask);
+         exponent--, mask >>= 1) {}
+    var mantissa = (sample >> (exponent + 3)) & 0x0F;
+    output.push((~(sign | (exponent << 4) | mantissa)) & 0xFF);
+  }
+  return output;
+}
+
+// Emery high-quality mastering. Keep processing deliberately gentle:
+// - DC/high-frequency smoothing removes low-level grit before mu-law encoding.
+// - An envelope-controlled gate avoids sample-by-sample threshold chatter.
+// - Envelope compression and a short sentence fade prevent isolated peak
+//   crackle and discontinuities where separately synthesized sentences join.
+function masterSpeechForWatch(pcm16) {
+  var output = [];
+  var previousInput = 0;
+  var previousFiltered = 0;
+  var previousSmoothed = 0;
+  var envelope = 0;
+  var gateGain = 0;
+  for (var i = 0; i < pcm16.length; i++) {
+    var input = pcm16[i] | 0;
+    var filtered = input - previousInput + 0.995 * previousFiltered;
+    previousInput = input;
+    previousFiltered = filtered;
+
+    // Mild 16 kHz low-pass: enough to tame mu-law edge grit without making
+    // speech sound muffled.
+    var smoothed = 0.78 * filtered + 0.22 * previousSmoothed;
+    previousSmoothed = smoothed;
+
+    var magnitude = Math.abs(smoothed);
+    envelope = magnitude > envelope ?
+      (0.18 * magnitude + 0.82 * envelope) :
+      (0.008 * magnitude + 0.992 * envelope);
+
+    var targetGate = envelope <= 80 ? 0 :
+      (envelope >= 300 ? 1 : (envelope - 80) / 220);
+    var gateRate = targetGate > gateGain ? 0.12 : 0.006;
+    gateGain += (targetGate - gateGain) * gateRate;
+
+    // Compress from the smoothed envelope, not individual samples. This avoids
+    // adding high-frequency distortion around consonants.
+    var compressorGain = 1;
+    if (envelope > 10500) {
+      var compressedEnvelope = 10500 + (envelope - 10500) / 2.8;
+      compressorGain = compressedEnvelope / envelope;
+    }
+    var mastered = smoothed * gateGain * compressorGain * 1.28;
+    if (mastered > 26500) mastered = 26500;
+    if (mastered < -26500) mastered = -26500;
+    output.push(Math.round(mastered));
+  }
+
+  // Google synthesizes each sentence independently. Fade only 6 ms at each
+  // boundary so adjacent responses meet close to zero instead of clicking.
+  var fadeSamples = Math.min(96, Math.floor(output.length / 2));
+  for (var f = 0; f < fadeSamples; f++) {
+    var boundaryGain = f / fadeSamples;
+    output[f] = Math.round(output[f] * boundaryGain);
+    var tail = output.length - 1 - f;
+    output[tail] = Math.round(output[tail] * boundaryGain);
+  }
+  return output;
+}
+
 // 检测文本语言：含中文字符返回中文语音，否则返回英文语音
 function detectTTSVoice(text) {
   if (/[\u4e00-\u9fff]/.test(text)) {
@@ -2790,6 +3114,7 @@ var ttsNextDeliver = 0;       // 下一个待投递的句序号（按序检查 p
 var ttsPendingDeliveries = {}; // seq → 编码好的 PCM 字节数组，等前序句子到齐后按序入 ttsAudioQueue
 var ttsTotalSentences = 0;    // 当前 session 总句数；全量预编码完成后才开始发送
 var ttsSendStarted = false;
+var ttsHighQuality = true;
 
 // 取消 TTS：手表停止朗读时调用。递增 sessionId 断绝旧进程，
 // 清空音频/句子队列，并从 amQueue 移除所有待发的 TTS_CHUNK/TTS_END/TTS_DONE。
@@ -2824,6 +3149,13 @@ function cancelTTS() {
 function startTTS() {
   ttsSessionId++;  // 断绝旧进程
   var thisSession = ttsSessionId;
+  ttsHighQuality = getSetting('tts_quality', 'high') !== 'standard';
+  try {
+    var ttsWatchInfo = Pebble.getActiveWatchInfo();
+    if (ttsWatchInfo && ttsWatchInfo.platform === 'flint')
+      ttsHighQuality = false;
+  } catch (ttsWatchInfoError) {}
+  sendToWatch({ 'TTS_FORMAT': ttsHighQuality ? 1 : 0 });
 
   var ttsApiKey = getSetting('tts_api_key', '');
   if (!ttsApiKey || ttsApiKey.trim().length === 0) {
@@ -2875,7 +3207,8 @@ function startTTS() {
   ttsTotalSentences = ttsSentenceQueue.length;
   ttsSendStarted = false;
   console.log('[TTS] session=' + thisSession + ' sentences=' +
-    ttsTotalSentences + ' rate=' + getSetting('tts_rate', '1.0'));
+    ttsTotalSentences + ' rate=' + getSetting('tts_rate', '1.0') +
+    ' format=' + (ttsHighQuality ? '16k-mulaw' : '8k-raw'));
   // 从 amQueue 移除上一次 session 残留的 TTS chunk。
   // watch 的 tts_request() 不发 TTS_CANCEL（避免 outbox 占用），所以旧 chunk 会继续
   // 灌入新 session 的缓冲 → 音频污染。这里显式过滤。
@@ -2949,7 +3282,11 @@ function ttsFetchNext(ttsApiKey, sessionId) {
   var body = {
     input: { text: sentence },
     voice: { languageCode: voice.lang, name: voice.name },
-    audioConfig: { audioEncoding: 'LINEAR16', sampleRateHertz: 8000, speakingRate: speakingRate }
+    audioConfig: {
+      audioEncoding: 'LINEAR16',
+      sampleRateHertz: ttsHighQuality ? 16000 : 8000,
+      speakingRate: speakingRate
+    }
   };
 
   xhr.onload = function() {
@@ -2968,7 +3305,9 @@ function ttsFetchNext(ttsApiKey, sessionId) {
             if (sample > 32767) sample -= 65536;
             pcm16.push(sample);
           }
-          var pcm8Bytes = pcm16ToPcm8(pcm16);
+          var pcm8Bytes = ttsHighQuality ?
+            pcm16ToMuLaw(masterSpeechForWatch(pcm16)) :
+            pcm16ToPcm8(pcm16);
           // 顺序投递：并发响应可能乱序，用 seq 保证 ttsAudioQueue 仍按原文顺序。
           ttsQueueDelivery(seq, pcm8Bytes);
         } else {
@@ -3019,9 +3358,12 @@ function ttsFetchNext(ttsApiKey, sessionId) {
 // observed with 350-byte packets. Keep at most two packets in flight: 2400B
 // fits Flint's 3788B headroom above PAUSE_HIGH without ring overflow.
 var TTS_AMQUEUE_SAFETY_LIMIT = 2;
-var TTS_CHUNK_SIZE = 1200;
-var TTS_SEND_DELAY_MS = 90;       // nominal 13.3KB/s; callback latency remains the real limiter
-var TTS_BOOST_SEND_DELAY_MS = 55; // nominal 21.8KB/s for short underrun recovery
+var TTS_STANDARD_CHUNK_SIZE = 1200;
+var TTS_HIGH_CHUNK_SIZE = 3000;
+var TTS_STANDARD_SEND_DELAY_MS = 90;
+var TTS_HIGH_SEND_DELAY_MS = 130;
+var TTS_STANDARD_BOOST_DELAY_MS = 55;
+var TTS_HIGH_BOOST_DELAY_MS = 80;
 var TTS_BOOST_MS = 5000;         // boost 只持续 5s，避免长期高吞吐重新触发 PAUSE 循环
 var TTS_PAUSE_STALE_MS = 7000;   // RESUME 丢失兜底，避免永久停止投递
 var ttsCurrentSentence = null;   // 正在分块发送的句子（字节组）
@@ -3062,7 +3404,9 @@ function ttsSendNext(sessionId) {
   // 当前句子还没发完：发下一个 chunk
   if (ttsCurrentSentence && ttsCurrentOffset < ttsCurrentSentence.length) {
     var chunk = [];
-    var end = ttsCurrentOffset + TTS_CHUNK_SIZE;
+    var chunkSize = ttsHighQuality ?
+      TTS_HIGH_CHUNK_SIZE : TTS_STANDARD_CHUNK_SIZE;
+    var end = ttsCurrentOffset + chunkSize;
     if (end > ttsCurrentSentence.length) end = ttsCurrentSentence.length;
     for (var i = ttsCurrentOffset; i < end; i++) {
       chunk.push(ttsCurrentSentence[i]);
@@ -3070,9 +3414,11 @@ function ttsSendNext(sessionId) {
     sendToWatch({ 'TTS_CHUNK': chunk });
     ttsCurrentOffset = end;
     // 正常略高于消费；PAUSE 会在上方停止继续排入音频。
-    var delay = TTS_SEND_DELAY_MS;
+    var delay = ttsHighQuality ?
+      TTS_HIGH_SEND_DELAY_MS : TTS_STANDARD_SEND_DELAY_MS;
     if (now < ttsBoostUntil) {
-      delay = TTS_BOOST_SEND_DELAY_MS;
+      delay = ttsHighQuality ?
+        TTS_HIGH_BOOST_DELAY_MS : TTS_STANDARD_BOOST_DELAY_MS;
     }
     setTimeout(function() { ttsSendNext(sessionId); }, delay);
     return;
@@ -3522,7 +3868,11 @@ Pebble.addEventListener('showConfiguration', function() {
   });
   var notesJson = encodeURIComponent(
     escapeUnicode(JSON.stringify(notesForConfig)));
-  var conversationUrlBudget = Math.max(150000, 480000 - notesJson.length);
+  var memoryJson = encodeURIComponent(
+    escapeUnicode(JSON.stringify(getMemoryMarkdown() ||
+      renderMemoryMarkdown([]))));
+  var conversationUrlBudget = Math.max(
+    150000, 480000 - notesJson.length - memoryJson.length);
   var safeDocs = [];
   var chatsCopy = store.chats.slice(-MAX_CONFIG_CHATS).reverse();
   for (var i = 0; i < chatsCopy.length; i++) {
@@ -3549,7 +3899,7 @@ Pebble.addEventListener('showConfiguration', function() {
 
   var url = 'https://deusaw.github.io/Pebble-Wrist-AI/config/'
     // iOS Pebble App 没有清理 Config WebView 缓存的入口；每次使用新 URL 绕过缓存。
-    + '?config_version=1.4.2-' + Date.now()
+    + '?config_version=1.5.0-' + Date.now()
     + '&has_key=' + hasKey
     + '&is_emery=' + isEmery
     + '&is_flint=' + isFlint
@@ -3567,6 +3917,7 @@ Pebble.addEventListener('showConfiguration', function() {
     + '&web_search_enabled=' + encodeURIComponent(getSetting('web_search_enabled', '1'))
     + '&health_enabled=' + encodeURIComponent(getSetting('health_enabled', '0'))
     + '&auto_dictation=' + encodeURIComponent(getSetting('auto_dictation', '0'))
+    + '&controls_visible=' + encodeURIComponent(getSetting('controls_visible', '1'))
     + '&health_days=' + encodeURIComponent(getSetting('health_days', '7'))
     + '&health_sleep=' + encodeURIComponent(getSetting('health_sleep', '1'))
     + '&duo_tts_enabled=' + encodeURIComponent(getSetting('duo_tts_enabled', '0'))
@@ -3577,10 +3928,12 @@ Pebble.addEventListener('showConfiguration', function() {
     + '&todoist_sync_interval=' + encodeURIComponent(getSetting('todoist_sync_interval', '0'))
     + '&theme_color=' + encodeURIComponent(getSetting('theme_color', '-1'))
     + '&has_tts_key=' + (getSetting('tts_api_key', '') ? '1' : '0')
-    + '&tts_rate=' + encodeURIComponent(getSetting('tts_rate', '1.0'));
+    + '&tts_rate=' + encodeURIComponent(getSetting('tts_rate', '1.0'))
+    + '&tts_quality=' + encodeURIComponent(getSetting('tts_quality', 'high'));
 
   var safeDocsJson = encodeURIComponent(escapeUnicode(JSON.stringify(safeDocs)));
-  url += '#export_data=' + safeDocsJson + '&notes_data=' + notesJson;
+  url += '#export_data=' + safeDocsJson + '&notes_data=' + notesJson +
+    '&memory_data=' + memoryJson;
 
   Pebble.openURL(url);
 });
@@ -3593,6 +3946,9 @@ Pebble.addEventListener('webviewclosed', function(e) {
   try {
     var settings = JSON.parse(decodeURIComponent(e.response));
     if (typeof settings !== 'object' || settings === null) return;
+
+    if (typeof settings.memory_markdown === 'string')
+      replaceMemoryMarkdownFromConfig(settings.memory_markdown);
 
     if (settings.delete_key) {
       localStorage.removeItem('api_key');
@@ -3648,6 +4004,10 @@ Pebble.addEventListener('webviewclosed', function(e) {
     if (typeof settings.auto_dictation !== 'undefined') {
       localStorage.setItem('auto_dictation', String(settings.auto_dictation));
     }
+    if (typeof settings.controls_visible !== 'undefined') {
+      localStorage.setItem('controls_visible',
+        String(settings.controls_visible));
+    }
     if (typeof settings.health_days !== 'undefined') {
       localStorage.setItem('health_days', String(settings.health_days));
     }
@@ -3698,6 +4058,10 @@ Pebble.addEventListener('webviewclosed', function(e) {
     }
     if (settings.tts_rate) {
       localStorage.setItem('tts_rate', settings.tts_rate);
+    }
+    if (settings.tts_quality === 'high' ||
+        settings.tts_quality === 'standard') {
+      localStorage.setItem('tts_quality', settings.tts_quality);
     }
 
     if (settings.switch_to) {

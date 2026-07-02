@@ -1,6 +1,9 @@
 # Wrist AI Watch UI Plan
 
-Status: design proposal only; not implemented in this pass.
+Status: partially implemented in v1.5.0. Compact themed headers, white
+content pages, system fonts, theme-colored selection with white text, the
+Controls reference, separate Archive entrance and non-overlapping Todoist
+status are live. A larger Home/Listening redesign remains deferred.
 
 ## Direction
 
@@ -8,7 +11,7 @@ Wrist AI should feel like a capable Pebble application, not a phone UI compresse
 
 Orange remains the Wrist AI primary accent and purple the secondary accent. Answer pages stay light. Large black or dark-gray phone-style cards are not part of this direction.
 
-v1.4.2 now supports Random or a fixed theme. Theme headers use a 26px Gothic 18 Bold bar so Chinese titles use a supported glyph size and sit visually centered.
+v1.5.0 now supports Random or a fixed theme. Theme headers use a 26px Gothic 18 Bold bar so Chinese titles use a supported glyph size and sit visually centered.
 
 ## Navigation model
 
@@ -30,6 +33,10 @@ Long SELECT continues to create a new conversation. Long DOWN on a reply remains
 - One status line: Ready, Listening, Sending, Thinking, Offline or API Key Required.
 - Bottom button legend: `UP Chats · SELECT Ask · DOWN Notes`.
 - Orange or purple can fill the status band, but the page background should remain platform-native.
+
+v1.5.0 keeps the existing branded Home to avoid a risky late-stage navigation
+rewrite. Todoist status is now a small gray line below the conversation title,
+and the complete control legend is available through `UP → Controls`.
 
 ### Listening and thinking
 
@@ -82,6 +89,11 @@ Chalk layouts need centered content and larger side insets. Diorite and Flint mu
 4. Add Note detail and delete confirmation.
 5. Apply platform palettes and Chalk geometry.
 6. Build all five targets, then test Basalt/Chalk screenshots and Emery/Flint memory.
+
+Implemented so far: native menu hierarchy, compact headers, selection
+contrast, Controls reference, Archive subwindow, reply spacing and theme
+consistency. Remaining work should be treated as a later visual release rather
+than mixed into v1.5.0 stability fixes.
 
 ## Non-goals
 

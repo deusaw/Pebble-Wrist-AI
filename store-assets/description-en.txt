@@ -1,0 +1,65 @@
+Wrist AI — Your Pebble, Now Smarter
+
+Your Pebble will be better with Wrist AI !!
+
+Wrist AI turns your Pebble into a flexible, deeply integrated AI assistant. Speak naturally, talk to your preferred Large Language Model, hear replies through supported watch speakers, understand your health trends, remember important personal context, and turn everyday language into Timeline events, reminders and ToDos.
+
+Use OpenRouter to access GPT, Claude, Gemini, Gemma, Llama, Qwen and many more models, or connect Wrist AI to your own compatible API endpoint. Your phone handles API requests over Bluetooth; Wrist AI requires no proprietary relay server.
+
+WHAT’S NEW IN 1.5
+
+• Long-term Memory — Wrist AI keeps a private local Memory.md for stable facts, preferences, routines and goals. Review or edit it from Config.
+• ToDo & Notes — Create several ToDos or Notes in one sentence, complete or reopen them, delete them, and return to the conversation that created them. Completed items move into a 50-item Archive.
+• Natural Timeline Assistant — Say “Remind me to leave in five minutes,” create several events at once, add true all-day events, or remove Wrist AI-created Timeline pins. You no longer need to explicitly say “Timeline”.
+• Todoist Two-Way Sync — Optionally synchronize untimed ToDos and timed Timeline items. Wrist AI syncs on launch, after changes, every five minutes while open, and through optional background Wakeups.
+• Smarter Health Context — Include 1, 3 or 7 days of activity data plus exact sleep/deep-sleep intervals. Wrist AI focuses on trends and practical suggestions rather than repeating numbers.
+• Better TTS — Pebble Time 2 receives high-quality 16 kHz playback, smoother long-form streaming and safer volume control. Pebble 2 Duo support is experimental.
+• Better Dictation — Review recognized speech before sending, re-record with DOWN, and automatically retry once after notification interruptions.
+• Pebble-Style UI — Configurable themes, clearer menus, improved Chinese text handling, safer navigation and an optional on-watch Controls tutorial.
+• Cleaner Web Search — Supported models can use current web information without filling the watch or TTS output with links and citation lists.
+
+CORE FEATURES
+
+• Voice conversations with up to 20 chats and 20 messages per chat
+• Up to five configurable models with on-watch switching
+• OpenRouter and custom OpenAI-compatible API support
+• Long-term Memory.md stored locally on the phone
+• Multi-day Pebble Health and exact sleep context
+• Timeline events, relative reminders, all-day events and strong local reminders
+• ToDo & Notes with conversation links and Archive
+• Optional Todoist two-way synchronization
+• TTS on Pebble Time 2; experimental Pebble 2 Duo support
+• Optional location context and web search
+• Conversation export, font controls and fixed or random themes
+• Basalt, Chalk, Diorite, Emery and Flint support
+
+GETTING STARTED
+
+1. Install Wrist AI and open Settings in the Pebble companion app.
+2. Add an OpenRouter API key, or select Custom API and enter your endpoint.
+3. Add up to five model IDs and choose the active model.
+4. Enable only the optional integrations you want: Health, Timeline, Todoist, location, web search or TTS.
+5. Open Wrist AI and press SELECT to talk.
+
+WATCH CONTROLS
+
+• SELECT: talk, send reviewed Dictation, close a reply, or stop TTS
+• Hold SELECT: start a new conversation
+• UP: open conversations/settings or scroll upward
+• DOWN: open ToDo & Notes, re-record Dictation, or scroll downward
+• Hold DOWN on a reply: read it aloud on a supported speaker watch
+• BACK: return to the previous screen
+
+The complete control guide appears in the watch UP menu and can be hidden from Config after onboarding.
+
+PRIVACY AND COMPATIBILITY
+
+Conversations, Memory.md, ToDo & Notes and integration mappings are stored locally by the Pebble companion environment. Requests are sent only to the APIs you configure. Health and location context are optional and are not written into normal conversation history.
+
+Timeline features require a compatible Core Devices companion app with local Timeline support. Notifications depend on watch vibration, notification and Do Not Disturb settings. Pebble 2 Duo TTS remains experimental because it has not been validated on physical Duo hardware.
+
+Source and support:
+github.com/deusaw/Pebble-Wrist-AI
+
+Support development:
+paypal.me/Asterwyn

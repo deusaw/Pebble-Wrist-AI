@@ -1,0 +1,54 @@
+Wrist AI — 让你的 Pebble 真正聪明起来
+
+Your Pebble will be better with Wrist AI !!
+
+Wrist AI 将 Pebble 变成一个灵活、深度融合的 AI 助手。你可以自然地说话，与喜欢的大语言模型对话，在支持扬声器的手表上听取回答，分析健康趋势，记住重要的长期信息，并通过普通语言创建 Timeline、提醒与待办。
+
+你可以通过 OpenRouter 使用 GPT、Claude、Gemini、Gemma、Llama、Qwen 等模型，也可以连接自己的兼容 API。手机通过蓝牙完成 API 请求，Wrist AI 不依赖专有中转服务器。
+
+1.5 主要更新
+
+• 长期记忆：使用保存在手机端的 Memory.md 记录稳定事实、偏好、习惯与目标，可在 Config 查看和编辑。
+• ToDo & Notes：一句话创建多个待办或笔记，完成、重开、删除，或返回创建它们的原始对话；已完成项目进入 50 条 Archive。
+• 自然语言 Timeline：直接说“五分钟后提醒我出发”，支持批量事件、All Day Event 与删除 Wrist AI 创建的 Pin，无需明确说出 Timeline。
+• Todoist 双向同步：可同步无时间 ToDo 与带时间 Timeline 项；启动时、改动后、应用打开期间每五分钟，以及可选后台 Wakeup 都会同步。
+• 更聪明的健康分析：提供 1、3、7 日活动数据与精确睡眠/深睡区间，关注趋势与可执行建议，而不是只复述数字。
+• 更好的 TTS：Pebble Time 2 支持高质量 16 kHz 播放、更平稳的长文本传输与安全音量；Pebble 2 Duo 为实验支持。
+• 更可靠的语音：识别后可确认、DOWN 重录，通知打断时自动重试一次。
+• 更符合 Pebble 的 UI：可选主题色、清晰菜单、更好的中文处理、更安全的导航，以及可关闭的手表 Controls 新手教程。
+• 更干净的 Web 搜索：可使用最新网页信息，同时避免在手表或 TTS 中输出无用链接和引用列表。
+
+核心能力
+
+• 语音对话，最多 20 个对话、每个对话 20 条消息
+• 最多配置五个模型并在手表切换
+• OpenRouter 与自定义兼容 API
+• 本地长期 Memory.md
+• 多日 Pebble Health 与精确睡眠上下文
+• Timeline、相对时间提醒、全天事件与强提醒
+• 可回到原对话的 ToDo & Notes 与 Archive
+• 可选 Todoist 双向同步
+• Pebble Time 2 TTS 与实验性 Pebble 2 Duo TTS
+• 可选位置上下文与 Web 搜索
+• 对话导出、字体设置与固定/随机主题
+• 支持 Basalt、Chalk、Diorite、Emery 与 Flint
+
+开始使用
+
+1. 安装 Wrist AI，在 Pebble App 中打开 Settings。
+2. 填入 OpenRouter API Key，或选择 Custom API 并填写自己的端点。
+3. 添加最多五个模型 ID 并选择当前模型。
+4. 按需启用 Health、Timeline、Todoist、位置、Web 搜索或 TTS。
+5. 打开 Wrist AI，按 SELECT 开始说话。
+
+隐私与兼容性
+
+对话、Memory.md、ToDo & Notes 与联动映射保存在 Pebble companion 环境本地。请求只会发送到你配置的 API。健康和位置上下文是可选功能，不会写入普通对话历史。
+
+Timeline 需要支持本地 Timeline 的 Core Devices companion app。通知效果取决于手表通知、震动和勿扰模式。Pebble 2 Duo TTS 尚未经过 Duo 真机验证，因此保持实验状态。
+
+源码与问题反馈：
+github.com/deusaw/Pebble-Wrist-AI
+
+支持开发：
+paypal.me/Asterwyn

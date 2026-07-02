@@ -204,6 +204,10 @@
     .note-config-item.done { opacity: .68; }
     .note-config-meta { margin: 0 0 8px; color: var(--muted); font-size: 10px; }
     .note-config-item textarea { min-height: 64px; margin-top: 7px; }
+    #memory_markdown {
+      min-height: 190px; font-family: Menlo, Monaco, monospace;
+      font-size: 12px; line-height: 1.45;
+    }
     .note-config-actions { display: flex; gap: 7px; margin-top: 8px; }
     .note-config-actions button {
       flex: 1; padding: 8px; border: 0; border-radius: 8px;
@@ -223,13 +227,13 @@
     <div class="brand-mark">Wi</div>
     <div>
       <h1>Wrist AI</h1>
-      <div class="subtitle">Watch settings · v1.4.2</div>
+      <div class="subtitle">Watch settings · v1.5.0</div>
     </div>
   </header>
   <div class="release-notice">
-    v1.4.2 adds exact Sleep intervals, ToDo & Notes, strong local reminders,
+    v1.5.0 adds exact Sleep intervals, ToDo & Notes, strong local reminders,
     launch-aware Timeline, long-term Memory, and Simplified Chinese normalization.
-    Install the v1.4.2 watch app before relying on these features.
+    Install the v1.5.0 watch app before relying on these features.
   </div>
 
   <details class="section-card" open>
@@ -330,6 +334,13 @@
       </div>
       <div class="field">
         <div class="toggle-row">
+          <span class="toggle-label">Show Controls Tutorial</span>
+          <label class="toggle-switch"><input type="checkbox" id="controls_visible" checked><span class="toggle-slider"></span></label>
+        </div>
+        <div class="hint">Shows the Controls guide in the watch UP menu. Turn it off after learning the button shortcuts.</div>
+      </div>
+      <div class="field">
+        <div class="toggle-row">
           <span class="toggle-label">Bold Reply Text</span>
           <label class="toggle-switch"><input type="checkbox" id="font_bold"><span class="toggle-slider"></span></label>
         </div>
@@ -399,12 +410,12 @@
       <div class="field">
         <label>Automatic Sync</label>
         <select id="todoist_sync_interval">
-          <option value="0">When Wrist AI opens</option>
-          <option value="30">Every 30 minutes</option>
-          <option value="60">Every hour</option>
-          <option value="180">Every 3 hours</option>
+          <option value="0">Open + every 5 min while in Wrist AI</option>
+          <option value="30">Also wake every 30 minutes</option>
+          <option value="60">Also wake every hour</option>
+          <option value="180">Also wake every 3 hours</option>
         </select>
-        <div class="hint">Scheduled sync briefly launches Wrist AI using one reserved Wakeup slot. Open-time sync always remains enabled.</div>
+        <div class="hint">Wrist AI syncs on launch and every five minutes while it stays open. Optional background sync briefly launches the watch app using one reserved Wakeup slot.</div>
       </div>
       <button type="button" class="btn btn-primary" id="todoist_test">Test Todoist Connection</button>
       <div class="status" id="todoist_test_status"></div>
@@ -425,6 +436,12 @@
        <option value="1.25">1.25× (Faster)</option>
        <option value="1.5">1.5× (Fast)</option>
      </select>
+     <label style="margin-top:8px;display:block">Audio Quality</label>
+     <select id="tts_quality">
+       <option value="high" selected>High · 16 kHz (Time 2)</option>
+       <option value="standard">Standard · 8 kHz</option>
+     </select>
+     <div class="hint" id="tts_quality_hint">High quality uses 16 kHz μ-law transport and native 16-bit playback on Pebble Time 2.</div>
      <div id="duo_tts_wrap" style="display:none;margin-top:10px">
        <div class="toggle-row">
          <span class="toggle-label">Enable Duo TTS <span class="beta-badge">Experimental</span></span>
@@ -438,6 +455,15 @@
      <div class="beta-hint">⚠️ Emery TTS was introduced in v1.3.0; experimental Duo support requires v1.4.0 or later.</div>
      <button class="btn btn-danger" id="delete_tts_key" style="margin-top:6px">Delete TTS Key</button>
     </div>
+    </div>
+  </details>
+
+  <details class="section-card">
+    <summary><h2>Memory.md</h2><span class="section-kicker">Review and edit long-term memory</span></summary>
+    <div class="section-body">
+      <textarea id="memory_markdown" maxlength="24000" spellcheck="false"></textarea>
+      <div class="hint">Use one item per line: <code>- key: stable fact</code>. Invalid lines block saving; sensitive credentials are discarded. Maximum 40 items / 12 KB.</div>
+      <div class="status" id="memory_status"></div>
     </div>
   </details>
 
@@ -597,6 +623,7 @@
     var webSearchEnabled = (getParam('web_search_enabled') || '1') === '1';
     var healthEnabled = getParam('health_enabled') === '1';
     var autoDictation = getParam('auto_dictation') === '1';
+    var controlsVisible = getParam('controls_visible') !== '0';
     var healthDays = getParam('health_days') || '7';
     var healthSleep = getParam('health_sleep') !== '0';
     var timelineEnabled = getParam('timeline_enabled') === '1';
@@ -609,6 +636,7 @@
 
     // Notes are carried in the URL hash alongside conversation export data.
     var configNotes = [];
+    var memoryMarkdown = '# Wrist AI Memory\n\n<!-- Managed automatically. Stable user facts only. -->\n';
     var pendingNoteDeletes = [];
     var dirtyNoteIds = {};
     try {
@@ -616,6 +644,15 @@
       if (notesMatch) configNotes = JSON.parse(decodeURIComponent(notesMatch[1])) || [];
     } catch (noteParseError) {}
     if (!Array.isArray(configNotes)) configNotes = [];
+    try {
+      var memoryMatch = window.location.hash.match(
+        new RegExp('(?:^|&)memory_data=([^&]*)'));
+      if (memoryMatch) {
+        var parsedMemory = JSON.parse(decodeURIComponent(memoryMatch[1]));
+        if (typeof parsedMemory === 'string') memoryMarkdown = parsedMemory;
+      }
+    } catch (memoryParseError) {}
+    var originalMemoryMarkdown = memoryMarkdown;
 
     function applyApiMode(mode) {
       apiMode = mode;
@@ -676,6 +713,7 @@
     document.getElementById('web_search_enabled').checked = webSearchEnabled;
     document.getElementById('health_enabled').checked = healthEnabled;
     document.getElementById('auto_dictation').checked = autoDictation;
+    document.getElementById('controls_visible').checked = controlsVisible;
     document.getElementById('health_days').value = healthDays;
     document.getElementById('health_sleep').checked = healthSleep;
     document.getElementById('timeline_enabled').checked = timelineEnabled;
@@ -694,6 +732,32 @@
     document.getElementById('todoist_token').placeholder =
       hasTodoistToken ? 'Leave blank to keep current token' :
         'Paste a Todoist API token';
+
+    var memoryEl = document.getElementById('memory_markdown');
+    var memoryStatusEl = document.getElementById('memory_status');
+    memoryEl.value = memoryMarkdown;
+    function validateMemoryEditor() {
+      var text = memoryEl.value;
+      var bytes = encodeUtf8Bytes(text).length;
+      var lines = text.split('\n');
+      var items = 0;
+      var invalidLines = 0;
+      for (var mi = 0; mi < lines.length; mi++) {
+        var trimmedLine = lines[mi].trim();
+        if (!trimmedLine || trimmedLine.charAt(0) === '#' ||
+            /^<!--[\s\S]*-->$/.test(trimmedLine)) continue;
+        if (/^- [^:]{1,48}:\s*.+$/.test(lines[mi])) items++;
+        else invalidLines++;
+      }
+      var valid = bytes <= 12000 && items <= 40 && invalidLines === 0;
+      memoryStatusEl.textContent = items + '/40 items · ' + bytes + '/12000 bytes' +
+        (invalidLines ? ' · ' + invalidLines + ' invalid line(s)' :
+          (valid ? '' : ' · Reduce Memory before saving'));
+      memoryStatusEl.style.color = valid ? '' : '#b3261e';
+      return valid;
+    }
+    memoryEl.addEventListener('input', validateMemoryEditor);
+    validateMemoryEditor();
 
     document.getElementById('todoist_test').addEventListener('click',
       function() {
@@ -771,6 +835,14 @@
     var ttsRateEl = document.getElementById('tts_rate');
     for (var ri = 0; ri < ttsRateEl.options.length; ri++) {
       if (ttsRateEl.options[ri].value === ttsRate) { ttsRateEl.selectedIndex = ri; break; }
+    }
+    var ttsQualityEl = document.getElementById('tts_quality');
+    var ttsQuality = getParam('tts_quality') || 'high';
+    ttsQualityEl.value = isFlint ? 'standard' : ttsQuality;
+    if (isFlint) {
+      ttsQualityEl.disabled = true;
+      document.getElementById('tts_quality_hint').textContent =
+        'Pebble 2 Duo uses the conservative 8 kHz mode.';
     }
 
     // 填充设置
@@ -858,9 +930,16 @@
         return (b.updated || b.created || 0) - (a.updated || a.created || 0);
       });
       var html = '';
+      var renderedArchiveHeading = false;
       for (var ni = 0; ni < configNotes.length; ni++) {
         var note = configNotes[ni];
         var done = note.status === 'done';
+        if (ni === 0 && !done)
+          html += '<div class="note-config-meta">ACTIVE</div>';
+        if (done && !renderedArchiveHeading) {
+          html += '<div class="note-config-meta" style="margin-top:14px">ARCHIVE · latest 50</div>';
+          renderedArchiveHeading = true;
+        }
         html += '<div class="note-config-item' + (done ? ' done' : '') +
           '" data-note-id="' + escapeHtml(note.id) + '">' +
           '<div class="note-config-meta">' +
@@ -976,9 +1055,11 @@
         web_search_enabled: document.getElementById('web_search_enabled').checked ? 1 : 0,
         health_enabled: document.getElementById('health_enabled').checked ? 1 : 0,
         auto_dictation: document.getElementById('auto_dictation').checked ? 1 : 0,
+        controls_visible: document.getElementById('controls_visible').checked ? 1 : 0,
         health_days: parseInt(document.getElementById('health_days').value, 10),
         health_sleep: document.getElementById('health_sleep').checked ? 1 : 0,
         tts_rate: document.getElementById('tts_rate').value,
+        tts_quality: document.getElementById('tts_quality').value,
         duo_tts_enabled: document.getElementById('duo_tts_enabled').checked ? 1 : 0,
         timeline_enabled: (document.getElementById('timeline_enabled').checked ||
           document.getElementById('todoist_enabled').checked) ? 1 : 0,
@@ -1001,6 +1082,8 @@
       if (noteUpdates.length > 0) s.note_updates = noteUpdates;
       if (pendingNoteDeletes.length > 0)
         s.deleted_notes = pendingNoteDeletes.slice();
+      if (memoryEl.value !== originalMemoryMarkdown)
+        s.memory_markdown = memoryEl.value;
       var key = document.getElementById('api_key').value.trim();
       if (key.length > 0) s.api_key = key;
       var ttsKey = document.getElementById('tts_api_key').value.trim();
@@ -1031,6 +1114,10 @@
 
     // 保存设置
     document.getElementById('save').addEventListener('click', function() {
+      if (!validateMemoryEditor()) {
+        alert('Memory.md exceeds 40 items or 12 KB.');
+        return;
+      }
       var btn = this;
       btn.disabled = true;
       btn.textContent = 'Saving...';

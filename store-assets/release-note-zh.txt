@@ -1,0 +1,9 @@
+Wrist AI 1.5 让 Pebble 成为更深入的个人 AI 助手。
+
+现在可以通过自然语言创建提醒、Timeline 事件和多个待办，在 ToDo & Notes 中统一管理、同步 Todoist，或返回创建它们的原始对话。Wrist AI 新增长期 Memory、精确睡眠区间、多日健康分析与可执行建议。
+
+手表体验经过全面重构：可选主题、更符合 Pebble 的菜单、语音确认与重录、更可靠的中文处理、更安全的导航，以及可关闭的 Controls 新手教程。
+
+Pebble Time 2 TTS 已升级为高质量 16 kHz 播放，拥有更清晰的音质、更平稳的传输与更安全的音量控制，同时包含实验性的 Pebble 2 Duo TTS。
+
+Your Pebble will be better with Wrist AI !!

@@ -4,11 +4,11 @@ This file is the current entry point for future coding agents.
 
 ## Current release
 
-- Target version: `1.4.2`
+- Target version: `1.5.0`
 - App UUID: `1c4a7728-ee62-431f-a941-e40fafab98af`
 - Supported targets: Basalt, Chalk, Diorite, Emery and Flint
-- Canonical plan: `V1.4.2_PLAN.md`
-- Latest audit: `V1.4.2_AUDIT.md`
+- Canonical plan: `V1.5.0_PLAN.md`
+- Latest audit: `V1.5.0_AUDIT.md`
 - Proposed watch redesign: `WATCH_UI_PLAN.md`
 
 The Git branch is still named `v1.4.0`; trust `package.json` and the audit documents for the release version.
@@ -33,7 +33,8 @@ the final PBW, not only `src/pkjs/pebble-js-app.js`.
 
 - Never change the UUID.
 - Append message keys only; reordering existing keys breaks the C/JS protocol.
-- `THEME_COLOR` is the current final key: `-1` is Random and `0..6` select a fixed theme.
+- Message keys are append-only. `CONTROLS_VISIBLE` is currently last (`10041`);
+  `THEME_COLOR` uses `-1` for Random and `0..6` for fixed themes.
 - Do not claim Timeline synchronization succeeded. The local insert API has no completion callback.
 - Timeline pins created by Wrist AI can be removed with the Core Devices
   `Pebble.deleteTimelinePin(id)` bridge; like insertion, it has no completion callback.
@@ -44,24 +45,35 @@ the final PBW, not only `src/pkjs/pebble-js-app.js`.
   projections. With Todoist enabled, task IDs link Todoist to those local projections.
 - Ordinary reminders use Timeline Reminder. Only explicit strong/persistent vibration uses Wakeup.
 - Keep visible replies at or below 1,800 UTF-8 bytes.
-- Chats remain 20 × 20 messages. ToDo & Notes remain 50, with 20 sent to the watch.
+- Chats remain 20 × 20 messages. Active ToDo & Notes and completed Archive
+  each retain up to 50; the watch snapshot contains 20 active + 10 archived.
   Wakeup allocation is seven strong-reminder slots plus one rolling Todoist sync slot.
 - Health and location are opt-in and must never be persisted into normal chat history.
 - Memory.md must not store secrets, authentication data, financial identifiers or exact health samples.
+- Stable personal facts explicitly intended for long-term memory are Memory-only
+  and must never create a shadow Note/TODO. Config edits use one
+  `- key: stable fact` item per line and retain the 40-item / 12KB limits.
 
 ## TTS safety baseline
 
-The menu remains 10%–100%, but logical 100% maps to hardware 60%.
+The menu remains 10%–100%, but logical 100% maps to hardware 50%.
 
 - Emery ring: 35,840 bytes, heap allocated
 - Flint ring: 12,288 bytes, heap allocated
 - Decode buffer: 1,600 bytes
 - Playback pump: 100 ms
-- JS chunks: 350 bytes every 43 ms
-- Emery pause/resume: 30,500 / 24,500
-- Flint pause/resume: 8,500 / 6,500
+- Emery high quality: 16 kHz μ-law transport, native 16-bit playback
+- Emery JS chunks: 3,000 bytes / 130 ms; pause/resume: 27,000 / 21,000
+- Flint JS chunks: 1,200 bytes / 90 ms; pause/resume: 8,500 / 6,500
 
-Do not casually retune these values. Flint has not been validated on physical Duo hardware.
+Emery mastering uses a smoothed envelope gate/compressor, mild high-frequency
+smoothing and six-millisecond sentence fades. Do not casually retune these
+values. Flint has not been validated on physical Duo hardware.
+
+Todoist sync runs on launch, after local mutations, every five minutes while
+the watch app remains open, and through optional background Wakeups. The
+watch-side foreground timer must defer while dictation, LLM work, TTS or a
+pending Note command owns the AppMessage path.
 
 ## Config constraints
 

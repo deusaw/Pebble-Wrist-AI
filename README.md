@@ -20,11 +20,11 @@ Works with OpenRouter (GPT, Claude, Gemini, Gemma, Llama, Qwen, and more) or you
 - **Conversation Export** — Export any conversation as a structured JSON file (with messages, timestamps, and model info) from the config page.
 - **Font Size & Bold** — Choose from three text sizes (Normal / Large / Extra Large) and toggle bold text for better readability on your wrist.
 - **"Surprise Me" Toggle** — Long-press DOWN for a random prompt, or disable it in settings if you prefer to avoid accidental triggers.
-- **Text-to-Speech (Emery; experimental on Pebble 2 Duo)** — Long-press DOWN on a reply to have it read aloud via Google Cloud TTS, with automatic Chinese/English voice detection. Duo playback is disabled by default and requires an explicit Experimental opt-in in Config. Adjustable volume and speaking rate. Raw 8-bit PCM streaming with watch-side flow control for smooth long-form playback. *Beta.*
+- **Text-to-Speech (Emery; experimental on Pebble 2 Duo)** — Long-press DOWN on a reply to have it read aloud via Google Cloud TTS, with automatic Chinese/English voice detection. Emery uses 16 kHz μ-law transport, native 16-bit playback, gentle mastering and sentence de-clicking. Duo remains on the conservative 8 kHz path. *Beta.*
 - **Multi-Day Health Context** — Optionally include 1, 3, or 7 days of steps, activity, distance, calories, heart rate, sleep, and deep sleep in the AI's context. Off by default. *Beta.*
-- **ToDo & Notes** — Create up to five items in one request. Press DOWN from the home screen to complete, reopen, delete, or return to the conversation that created an item.
+- **ToDo & Notes** — Create up to five items in one request. Press DOWN from the home screen to complete, reopen, delete, or return to the conversation that created an item. Completed items move to a 50-item Archive.
 - **Config ToDo & Notes Management** — View, edit, complete/reopen, and delete local ToDo & Notes from Config.
-- **Todoist Two-Way Sync** — Untimed ToDo & Notes and timed Timeline events synchronize directly with Todoist. Changes, completion, reopening, due-time changes, and deletion in Todoist are projected back to Wrist AI on the next sync.
+- **Todoist Two-Way Sync** — Untimed ToDo & Notes and timed Timeline events synchronize directly with Todoist. Wrist AI syncs on launch, every five minutes while open, after local mutations, and through optional background Wakeups.
 - **Selectable Theme** — Keep themes random or fix Orange, Violet, Indigo, Cobalt, Oxford Blue, Red, or Deep Gray across Home, headers, and menu selection.
 - **Strong Local Reminders** — Explicit strong-reminder requests use one of seven persistent watch Wakeup slots and a longer vibration pattern; the eighth Wakeup slot is reserved for optional Todoist synchronization.
 - **Timeline Reminders** — Create, update, and remove timed reminders, date-only all-day events, and batches of local Pebble Timeline events through natural-language conversations and Todoist synchronization. Requires a compatible Core Devices companion app. *Beta.*
@@ -83,10 +83,11 @@ Works with OpenRouter (GPT, Claude, Gemini, Gemma, Llama, Qwen, and more) or you
 Accessible via the UP button:
 
 - **Row 0: Current Model** — tap to open the model select sub-menu
-- **Row 1: + Start New Chat** — clears context and starts fresh
-- **Row 2: Web Search** — toggle web search on or off
-- **Row 3: Volume** (Emery/Flint) — choose TTS playback volume from 10% to 100%
-- **Row 3+ (without speaker) / Row 4+ (Emery/Flint): Chat History** — select a previous conversation to resume with full context
+- **Row 1: Controls** — opens the built-in short/long-press reference
+- **Row 2: ToDo & Notes** — opens active items and the separate Archive entrance
+- **Row 3: Web Search** — toggle web search on or off
+- **Row 4: Volume** (Emery/Flint) — choose TTS playback volume from 10% to 100%
+- **Row 4+ (without speaker) / Row 5+ (Emery/Flint): Chat History** — select a previous conversation to resume with full context
 
 ### Model Select
 
@@ -108,20 +109,25 @@ Accessible via the UP button:
 | `src/pkjs/pebble-js-app.js` | JavaScript (ES5) | API calls, conversation storage, config, chunked Bluetooth transfer |
 | `config/index.html` | HTML/CSS/JS | Settings page (hosted on GitHub Pages) |
 
-The watch communicates with the phone over Bluetooth using Pebble's AppMessage protocol. Long responses are chunked into ~256-byte segments and reassembled on the watch. TTS audio is streamed as raw 8-bit PCM chunks with watch→phone flow control. ToDo & Notes, chats, Memory.md, Timeline/Todoist mappings, the incremental sync token, and the durable offline outbox are stored phone-side; strong reminder and Todoist sync Wakeups are persisted on the watch.
+The watch communicates with the phone over Bluetooth using Pebble's AppMessage protocol. Long responses are chunked into ~256-byte segments and reassembled on the watch. Emery TTS uses one-byte μ-law transport decoded to native 16-bit audio; Flint uses 8-bit PCM. Both use watch→phone flow control. ToDo & Notes, chats, Memory.md, Timeline/Todoist mappings, the incremental sync token, and the durable offline outbox are stored phone-side; strong reminder and Todoist sync Wakeups are persisted on the watch.
 
 ---
 
 ## Version History
 
-### v1.4.2
-- **ToDo & Notes** — DOWN from the home screen opens a lightweight local list. Items can be completed, reopened, deleted, or returned to their originating conversation; one request can create up to five items.
+### v1.5.0
+- **ToDo & Notes** — DOWN opens active items plus a compact Archive entrance. Items can be completed, reopened, deleted, or returned to their originating conversation; the latest 50 completions are retained.
 - **Timeline-linked ToDo & Notes** — Actionable Timeline requests can create one linked TODO without duplicating the event. Ordinary appointments are stored as Event items and projected to Timeline.
-- **Todoist Sync** — Optional direct Todoist synchronization uses persistent task IDs, an offline mutation queue, incremental Sync API reads, Homepage status, and optional 30-minute/1-hour/3-hour Wakeups.
+- **Todoist Sync** — Optional direct synchronization uses persistent task IDs, an offline mutation queue and incremental reads. It runs on launch, every five minutes while Wrist AI remains open, after local mutations, and through optional 30-minute/1-hour/3-hour Wakeups. Status appears below the conversation title; an enabled integration without a token shows `Set up Todoist`.
+- **On-watch Controls Guide** — The UP menu includes a Pebble-style reference for every contextual short/long-press action. It can be hidden from Config after onboarding.
+- **TTS De-clicking** — Emery high-quality audio now uses a smoothed noise gate, envelope compression, gentle high-frequency smoothing and six-millisecond sentence fades to reduce isolated crackle and μ-law grain.
 - **Strong Local Reminders** — Explicit strong-reminder requests use up to seven watch Wakeup slots with a longer vibration pattern; one slot is reserved for optional synchronization.
 - **Exact Sleep Intervals** — Supplies the LLM with real sleep/deep-sleep start and end times instead of aggregate minutes alone.
 - **Launch-aware Timeline Integration** — Recognizes Timeline actions and launch codes, restores the Event's original conversation when available, and preserves Event context.
-- **Long-term Memory** — Maintains a compact, controlled local `Memory.md` containing stable user preferences and context.
+- **Long-term Memory** — Stable personal facts such as a birth date, identity,
+  durable preferences and long-term goals are routed exclusively to a compact
+  local `Memory.md`, never shadow Notes. Config can review and safely edit the
+  Markdown document.
 - **Simplified Chinese Normalization** — Converts Dictation and LLM text from Traditional to Simplified Chinese before display, storage, title generation, Timeline parsing, and TTS.
 - **Smaller Chinese Replies** — Reply text now uses the same 14/18/24 size ladder as the question area instead of the former larger 18/24/28 ladder.
 - **Dictation Review and Recovery** — After recognition, SELECT sends, DOWN re-records, and BACK cancels. Unexpected system aborts such as notification interruptions retry Dictation once.
@@ -129,19 +135,23 @@ The watch communicates with the phone over Bluetooth using Pebble's AppMessage p
 - **Unified Theme Headers** — Settings, ToDo & Notes, item actions, Dictation review, and replies use compact bold headers colored from the Home theme instead of decorative stripes.
 - **Reliable Direct TODO Creation** — Explicit named requests have a deterministic fallback when the model omits the hidden Note control block.
 
+Release-ready App Store copy and the 720×320 banner are stored in
+[`store-assets`](store-assets/). The full bilingual change list is in
+[`V1.5.0_RELEASE_NOTES.md`](V1.5.0_RELEASE_NOTES.md).
+
 ### v1.4.0
 - **Multi-day Health and Sleep** — Send 1, 3, or 7 days of activity, calories, heart rate, sleep, and deep-sleep history to the selected LLM.
 - **Listen on Launch** — Optional one-shot automatic dictation when Wrist AI opens; the recognized question is sent directly to the LLM.
 - **Pebble Timeline** — Create local Timeline events through conversation, including relative times, notification reminders, and up to five events in one request. Core Devices' local insert/delete bridge is used for Todoist updates and removals.
 - **Timeline boundary** — Core Devices exposes local insert/delete bridges, but no local Timeline list API. Wrist AI can manage Timeline pins it created and saved locally; events from other apps remain outside its local index.
 - **Pebble 2 Duo TTS** — Added conservative experimental Flint support. Disabled by default and not yet validated on physical Duo hardware.
-- **Safer TTS Volume** — The watch menu remains 10%–100%, while hardware output is capped at 60% to avoid high-volume clipping.
+- **Safer TTS Volume** — The watch menu remains 10%–100%, while current hardware output is capped at 50% to avoid high-volume clipping.
 - **Improved Readability** — Replaced overly bright filled backgrounds while preserving the orange and purple visual style. Reply and menu pages keep their existing appearance.
 - **Cleaner Web Search Replies** — URLs, domain names, source lists, and numbered citations are removed before display, storage, and TTS.
 - **Config and Export Fixes** — Fixed iOS PKJS loading, bypassed stale Config WebView caches, and exported JSON with explicit UTF-8 encoding for Chinese text.
 
 ### v1.3.0
-- **Text-to-Speech** — Read AI replies aloud on Emery (Google Cloud TTS, auto Chinese/English). Long-press DOWN to read; short-press SELECT to stop. TTS volume is selected from the watch UP menu (`Volume`, 10%-100%); the logical 100% is capped to 60% speaker output to prevent high-volume clipping. It is local to the watch and not synced to the config page. Configurable speaking rate. Raw 8-bit PCM streaming with watch→phone flow control (PAUSE/RESUME) and pre-encoded sentence audio for smoother long-form playback. *Beta.*
+- **Text-to-Speech** — Read AI replies aloud on Emery (Google Cloud TTS, auto Chinese/English). Long-press DOWN to read; short-press SELECT to stop. TTS volume is selected from the watch UP menu (`Volume`, 10%-100%); current logical 100% maps to 50% hardware output. Config provides speaking rate and Emery high-quality/standard mode. *Beta.*
 - **Health Context** — Optional toggle to include daily steps and active minutes in AI context. Off by default. *Beta.*
 - **Location Context** — Optional toggle to include approximate GPS (reverse-geocoded to city name) in AI context. Off by default. *Beta.*
 - **Web Search** — Optional toggle to let models search the web for current information (OpenRouter only, on by default). Configurable from the config page or the watch menu. *Beta.*
@@ -149,7 +159,7 @@ The watch communicates with the phone over Bluetooth using Pebble's AppMessage p
 - **Speaking rate** — Adjustable TTS speed (0.75× / 1.0× / 1.25× / 1.5×) from the config page.
 - **Bug fixes** — Fixed TTS error messages corrupting AI replies and freezing buttons; removed the "Voice" API mode trap that hid the API key field; cleaned up residual "Surprise" display when sending fails; aligned TTS audio length with on-screen text length; rounded active minutes (<60s no longer counts as 0); added TTS loading indicator; fixed `atob` not available in PebbleKit JS; fixed TTS request failing when outbox was busy.
 - **Pre-release hardening** — Declared `health` capability (health data was silently failing without it); added TTS cancel protocol so Stop actually stops; TTS HTTP/network errors now surface to the user; TTS watchdog prevents permanent button freeze if a message is dropped; health data now correctly reports legitimate zero values; TTS playback stays controllable until audio fully drains.
-- **TTS audio engine overhaul** (real-device tuning) — Replaced 4-bit ADPCM with raw 8-bit PCM, switched low-volume control to Pebble's speaker volume API instead of 8-bit digital attenuation, uses a 36KB ring buffer with PAUSE/RESUME watermarks, 350B/43ms forward pacing, 80 TTS stream retries, and guarded non-animated scrolling during playback. Reference implementation: [Pebble_Gemini](https://github.com/ericlmccormick/Pebble_Gemini).
+- **TTS audio engine overhaul** (real-device tuning) — Replaced 4-bit ADPCM, switched volume control to Pebble's speaker API, uses a 35KB Emery ring buffer with PAUSE/RESUME watermarks, large packets for reliable iOS background delivery, and guarded non-animated scrolling during playback. Emery high-quality mode adds 16 kHz μ-law transport and native 16-bit output. Reference implementation: [Pebble_Gemini](https://github.com/ericlmccormick/Pebble_Gemini).
 
 ### v1.2.0
 - **Font size settings** — Choose Normal, Large, or Extra Large text in the config page
@@ -164,7 +174,7 @@ The watch communicates with the phone over Bluetooth using Pebble's AppMessage p
 - Dictation language is determined by the phone-side Rebble voice service; the app cannot set it. Display of non-Latin scripts depends on the watch's installed language pack.
 - Text only — no images or emoji rendering on Pebble's display
 - Conversation content is not persisted on the watch after restart (full history lives on the phone)
-- TTS is stable on Emery and experimental on Pebble 2 Duo (Flint). Audio is streamed as raw 8-bit PCM with watch-side flow control; on extreme Bluetooth jitter, minor word-level chop may still occur. Menu volume remains 10%-100%, while code maps it to 6%-60% speaker output; PCM samples retain their full dynamic range.
+- TTS is stable on Emery and experimental on Pebble 2 Duo (Flint). Emery uses 16 kHz μ-law/16-bit playback; Flint uses conservative 8 kHz PCM. On extreme Bluetooth jitter, minor word-level chop may still occur. Menu volume remains 10%-100%, while code caps hardware output at 50%.
 - Timeline notifications depend on the watch's notification, vibration, and Do Not Disturb settings. Timeline reminders are not Pebble system alarms and do not provide alarm snooze behavior.
 - Pebble 2 Duo TTS remains disabled by default because physical Duo playback has not been validated.
 
