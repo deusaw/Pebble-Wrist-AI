@@ -2874,6 +2874,8 @@ function startTTS() {
   ttsPendingDeliveries = {};
   ttsTotalSentences = ttsSentenceQueue.length;
   ttsSendStarted = false;
+  console.log('[TTS] session=' + thisSession + ' sentences=' +
+    ttsTotalSentences + ' rate=' + getSetting('tts_rate', '1.0'));
   // 从 amQueue 移除上一次 session 残留的 TTS chunk。
   // watch 的 tts_request() 不发 TTS_CANCEL（避免 outbox 占用），所以旧 chunk 会继续
   // 灌入新 session 的缓冲 → 音频污染。这里显式过滤。
@@ -2903,6 +2905,8 @@ var TTS_PREFETCH_CONCURRENCY = 3;
 var ttsFetchingCount = 0;
 
 function ttsQueueDelivery(seq, pcm8Bytes) {
+  console.log('[TTS] encoded seq=' + seq + ' bytes=' +
+    ((pcm8Bytes && pcm8Bytes.length) || 0));
   ttsPendingDeliveries[seq] = pcm8Bytes || [];
   while (ttsPendingDeliveries.hasOwnProperty(ttsNextDeliver)) {
     ttsAudioQueue.push(ttsPendingDeliveries[ttsNextDeliver]);
@@ -2918,6 +2922,7 @@ function ttsMaybeStartSending(sessionId) {
   if (ttsNextDeliver < ttsTotalSentences) return;
 
   ttsSendStarted = true;
+  console.log('[TTS] all sentences encoded; streaming session=' + sessionId);
   ttsSendNext(sessionId);
 }
 
@@ -3007,12 +3012,16 @@ function ttsFetchNext(ttsApiKey, sessionId) {
 
 // LOOP 2：从音频队列取 raw PCM 数据 → 分块入 amQueue 串行发送
 // 终局策略：恒速前馈，而不是靠 PAUSE/RESUME 闭环调速。
-// 正常按 350B/43ms≈8.14KB/s 投递，略高于 8KB/s 播放消费；手表先攒 3s 再开播。
+// 正常按 1200B 大包投递，降低 iOS 后台的逐包回调开销；手表先攒 3s 再开播。
 // PAUSE/RESUME 只作为接近满缓冲的保险，正常朗读不应频繁触发。
-var TTS_AMQUEUE_SAFETY_LIMIT = 8; // amQueue 待发 TTS chunk 安全上限（防 PAUSE 往返期间无限堆积）
-var TTS_CHUNK_SIZE = 350;        // 单包适中，减少蓝牙消息数量，同时保持接近播放时钟的恒速投递
-var TTS_SEND_DELAY_MS = 43;      // 350B/43ms≈8.14KB/s，接近播放速率，避免水位大幅震荡
-var TTS_BOOST_SEND_DELAY_MS = 30; // 低水位/underrun 后≈11.7KB/s 短暂补货，缩短重启空洞
+// iOS heavily throttles per-message callbacks while Pebble is backgrounded.
+// Larger packets preserve raw PCM quality while avoiding the 3KB/s ceiling
+// observed with 350-byte packets. Keep at most two packets in flight: 2400B
+// fits Flint's 3788B headroom above PAUSE_HIGH without ring overflow.
+var TTS_AMQUEUE_SAFETY_LIMIT = 2;
+var TTS_CHUNK_SIZE = 1200;
+var TTS_SEND_DELAY_MS = 90;       // nominal 13.3KB/s; callback latency remains the real limiter
+var TTS_BOOST_SEND_DELAY_MS = 55; // nominal 21.8KB/s for short underrun recovery
 var TTS_BOOST_MS = 5000;         // boost 只持续 5s，避免长期高吞吐重新触发 PAUSE 循环
 var TTS_PAUSE_STALE_MS = 7000;   // RESUME 丢失兜底，避免永久停止投递
 var ttsCurrentSentence = null;   // 正在分块发送的句子（字节组）
@@ -3084,6 +3093,7 @@ function ttsSendNext(sessionId) {
       return;
     }
     // 全部句子发完且无在途获取：发"朗读全部结束"标记
+    console.log('[TTS] stream queued complete session=' + sessionId);
     sendToWatch({ 'TTS_DONE': 1 });
     return;
   }
@@ -3288,12 +3298,14 @@ Pebble.addEventListener('appmessage', function(e) {
   // PAUSE：手表缓冲接近高水位，JS 进入软降速；RESUME：缓冲回到安全线，恢复正常速度。
   // 不再硬停投递，否则 RESUME 抖动会把几百毫秒蓝牙延迟放大成可闻大空洞。
   if (typeof e.payload['TTS_PAUSE'] !== 'undefined') {
+    console.log('[TTS] PAUSE from watch pending=' + ttsPendingChunkCount());
     ttsPaused = true;
     ttsPauseSince = Date.now();
     ttsBoostUntil = 0;
     return;
   }
   if (typeof e.payload['TTS_RESUME'] !== 'undefined') {
+    console.log('[TTS] RESUME from watch pending=' + ttsPendingChunkCount());
     ttsPaused = false;
     ttsPauseSince = 0;
     ttsBoostUntil = Date.now() + TTS_BOOST_MS;
